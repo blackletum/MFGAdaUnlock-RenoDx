@@ -3,18 +3,24 @@
 Status: experimental, disabled by default, and not intended for release until
 matched visual captures and frame-pacing tests are complete.
 
-## Target
+## Unified target
 
 This experiment targets foreground/background bleeding and silhouette
 stretching when a moving object crosses a depth boundary, such as a character
 passing in front of a tree. It does not claim to identify true visibility or
 reconstruct pixels that are hidden in both source frames.
 
+The following names describe overlapping symptoms rather than five independent
+signals: occlusion-boundary artifacts, foreground/background bleeding,
+silhouette/edge stretching, motion-boundary artifacts and depth-discontinuity
+artifacts. The implementation deliberately treats them as one boundary-quality
+system so the same motion/depth evidence is not penalized repeatedly.
+
 The addon has no validated visibility mask at its current intervention points.
 The safest available proxy is local motion and processed depth already present
 inside NVIDIA's `Kernel_EstimateIntermMvecsScatter` shared tile.
 
-## Behavior
+## Balanced behavior
 
 The released 0.9 Intermediate Scatter Retention halves a motion-consistency
 divisor unconditionally. The guard replaces that added relaxation with:
@@ -41,13 +47,34 @@ The guard conditions only this fork's extra intermediate retention. It does not
 make NVIDIA's native rejection stricter, change the frame multiplier, alter
 Streamline tags, rewrite game depth/motion resources, or touch Present/pacing.
 
+## Aggressive behavior
+
+Aggressive uses the same proven shared-tile inputs but is strictly no more
+permissive than Balanced:
+
+```text
+sameSurface   = ordered(abs(neighborDepth - centerDepth) < 2)
+sumSupport    = sum(motionSupport for same-surface cardinal neighbors)
+confidence    = saturate(sumSupport - 1)^2
+K_effective   = K_native * (1 - 0.25 * confidence)
+```
+
+A single perfect neighbor therefore provides no added relaxation. More than one
+neighbor-equivalent of coherent support is required, marginal evidence is
+suppressed nonlinearly, and full confidence reaches only `0.75*K_native` versus
+Balanced's `0.5*K_native`. This more strongly favors the provider's native
+rejection near depth/motion boundaries at the cost of narrow-detail retention.
+
 ## Runtime and fallback
 
-The option is persisted as `SilhouetteBoundaryGuard` and requires a restart.
-When enabled it supersedes unconditional Intermediate Scatter Retention for the
-same motion-vector kernel. If the exact guard cubin is unavailable and the
-regular Intermediate option is enabled, the addon falls back to the released
-0.9 retention variant. Otherwise it retains the baseline Blackwell kernel.
+The three-state option is persisted as `BoundaryArtifactMitigationMode` and
+requires a restart: Off, Balanced and Aggressive. The earlier experimental
+`SilhouetteBoundaryGuard` boolean is migrated to Balanced when the new key does
+not exist. A selected guard supersedes unconditional Intermediate Scatter
+Retention for the same motion-vector kernel. Aggressive falls back to Balanced
+when only that exact variant is available; a regular Intermediate selection
+then remains the released 0.9 compatibility fallback. Otherwise the baseline
+Blackwell kernel is retained.
 
 All selection remains fail-closed behind the existing provider metadata, exact
 source cubin hash, role, architecture and slot-size checks. NVIDIA payloads are

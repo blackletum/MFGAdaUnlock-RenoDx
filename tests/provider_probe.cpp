@@ -132,7 +132,8 @@ int wmain(int argc, wchar_t** argv) {
   std::string silhouette_detail;
   const bool silhouette_supported = mfgunlock::blackwell::Apply(
       module, blackwell_patches, blackwell_allocations, silhouette_result,
-      silhouette_detail, true, true);
+      silhouette_detail, true,
+      mfgunlock::blackwell::SilhouetteGuardMode::Aggressive);
   std::cout << "silhouette_guard_framework_supported="
             << (silhouette_supported ? "yes" : "no") << '\n';
   std::cout << "silhouette_guard="
@@ -140,6 +141,10 @@ int wmain(int argc, wchar_t** argv) {
             << '\n';
   std::cout << "silhouette_guard_fallback="
             << (silhouette_result.silhouette_guard_fallback ? "yes" : "no")
+            << '\n';
+  std::cout << "silhouette_guard_selected="
+            << mfgunlock::blackwell::SilhouetteGuardName(
+                   silhouette_result.silhouette_guard_mode_selected)
             << '\n';
   std::cout << "silhouette_guard_detail=" << silhouette_detail << '\n';
   mfgunlock::blackwell::Restore(blackwell_patches, blackwell_allocations);

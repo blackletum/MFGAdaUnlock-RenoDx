@@ -158,8 +158,12 @@ std::atomic_bool g_configured_thin_geometry_intermediate_scatter{true};
 // Optional replacement for unconditional intermediate retention. It conditions
 // only our additional relaxation on a local same-depth, motion-coherent cluster
 // and otherwise returns to the provider's native rejection behavior.
-std::atomic_bool g_silhouette_boundary_guard{false};
-std::atomic_bool g_configured_silhouette_boundary_guard{false};
+std::atomic<unsigned int> g_silhouette_guard_mode{
+    static_cast<unsigned int>(
+        mfgunlock::blackwell::SilhouetteGuardMode::Off)};
+std::atomic<unsigned int> g_configured_silhouette_guard_mode{
+    static_cast<unsigned int>(
+        mfgunlock::blackwell::SilhouetteGuardMode::Off)};
 // Raising the plugin's own clamp broke GTA V Enhanced -- its 2.9.1.0 plugin was
 // only ever shipped bounded at 3, and lifting that is not the same as it being
 // able to cope. Off by default; updating the plugin is the sound fix.
@@ -785,7 +789,9 @@ bool ThinGeometryRequested() {
   return g_thin_geometry_validated_warp_blend.load(std::memory_order_relaxed) ||
          g_thin_geometry_previous_scatter.load(std::memory_order_relaxed) ||
          g_thin_geometry_intermediate_scatter.load(std::memory_order_relaxed) ||
-         g_silhouette_boundary_guard.load(std::memory_order_relaxed);
+         g_silhouette_guard_mode.load(std::memory_order_relaxed) !=
+             static_cast<unsigned int>(
+                 mfgunlock::blackwell::SilhouetteGuardMode::Off);
 }
 
 bool ModuleHasThinGeometryResult(HMODULE mod) {
@@ -815,12 +821,14 @@ bool PatchBlackwellInModule(HMODULE mod) {
   const bool enable_intermediate_scatter =
       g_thin_geometry_intermediate_scatter.load(std::memory_order_relaxed) &&
       supported_thin_geometry_provider;
-  const bool enable_silhouette_guard =
-      g_silhouette_boundary_guard.load(std::memory_order_relaxed) &&
-      supported_thin_geometry_provider;
+  const auto silhouette_guard_mode = supported_thin_geometry_provider
+                                         ? static_cast<mfgunlock::blackwell::SilhouetteGuardMode>(
+                                               g_silhouette_guard_mode.load(
+                                                   std::memory_order_relaxed))
+                                         : mfgunlock::blackwell::SilhouetteGuardMode::Off;
   if (!mfgunlock::blackwell::Apply(mod, patches, allocations, result, detail,
                                    enable_intermediate_scatter,
-                                   enable_silhouette_guard)) {
+                                   silhouette_guard_mode)) {
     g_blackwell_detail = detail;
     return false;
   }
@@ -876,8 +884,12 @@ void PatchThinGeometryInModule(HMODULE mod) {
                                 module_result.result,
                                 module_result.provider_version);
 
+  const auto silhouette_guard_mode =
+      static_cast<mfgunlock::blackwell::SilhouetteGuardMode>(
+          g_silhouette_guard_mode.load(std::memory_order_relaxed));
   const bool silhouette_guard_requested =
-      g_silhouette_boundary_guard.load(std::memory_order_relaxed);
+      silhouette_guard_mode !=
+      mfgunlock::blackwell::SilhouetteGuardMode::Off;
   module_result.intermediate_scatter.requested =
       g_thin_geometry_intermediate_scatter.load(std::memory_order_relaxed) &&
       !silhouette_guard_requested;
@@ -927,8 +939,18 @@ void PatchThinGeometryInModule(HMODULE mod) {
         module_result.silhouette_boundary_guard.applied =
             blackwell->result.silhouette_guard;
         if (blackwell->result.silhouette_guard) {
-          module_result.silhouette_boundary_guard.detail =
-              "exact motion-vector cubin matched the same-depth local-support variant";
+          std::ostringstream detail;
+          detail << "requested "
+                 << mfgunlock::blackwell::SilhouetteGuardName(
+                        blackwell->result.silhouette_guard_mode_requested)
+                 << "; selected "
+                 << mfgunlock::blackwell::SilhouetteGuardName(
+                        blackwell->result.silhouette_guard_mode_selected)
+                 << " same-depth local-support variant";
+          if (blackwell->result.silhouette_guard_fallback) {
+            detail << " as a compatibility fallback";
+          }
+          module_result.silhouette_boundary_guard.detail = detail.str();
         } else if (blackwell->result.silhouette_guard_fallback) {
           module_result.silhouette_boundary_guard.detail =
               "guard variant unavailable; released 0.9 intermediate retention was applied as a safe fallback";
@@ -2558,31 +2580,49 @@ void OnRegisterOverlay(reshade::api::effect_runtime* /*runtime*/) {
       "test stays active. May preserve fences, foliage and moving edges; disable it\n"
       "if a game shows added trails, ghosting or disocclusion artifacts.");
 
-  bool silhouette_guard =
-      g_configured_silhouette_boundary_guard.load(std::memory_order_relaxed);
-  if (ImGui::Checkbox(
-          "Silhouette disocclusion guard (Experimental)##silhouette_guard",
-          &silhouette_guard)) {
-    g_configured_silhouette_boundary_guard.store(
-        silhouette_guard, std::memory_order_relaxed);
+  int silhouette_mode = static_cast<int>(
+      g_configured_silhouette_guard_mode.load(std::memory_order_relaxed));
+  const char* silhouette_modes[] = {
+      "Off - released 0.9 behavior",
+      "Balanced - preserve supported thin silhouettes",
+      "Aggressive - prefer cleaner motion/depth boundaries"};
+  if (ImGui::Combo("Boundary artifact mitigation (restart required)",
+                   &silhouette_mode, silhouette_modes,
+                   static_cast<int>(std::size(silhouette_modes)))) {
+    g_configured_silhouette_guard_mode.store(
+        static_cast<unsigned int>(silhouette_mode),
+        std::memory_order_relaxed);
     reshade::set_config_value(nullptr, kConfigSection,
-                              "SilhouetteBoundaryGuard",
-                              silhouette_guard ? 1 : 0);
+                              "BoundaryArtifactMitigationMode",
+                              silhouette_mode);
   }
-  ImGui::TextWrapped(
-      "Off by default. When enabled, it replaces unconditional intermediate\n"
-      "retention with a same-depth, motion-coherent local-support test. This may\n"
-      "reduce foreground/background bleeding and stretching around moving\n"
-      "silhouettes. It cannot reconstruct genuinely hidden pixels and may trade\n"
-      "some thin-detail persistence for cleaner occlusion boundaries.");
-  if (silhouette_guard && !intermediate_scatter) {
+  if (silhouette_mode == static_cast<int>(
+                             mfgunlock::blackwell::SilhouetteGuardMode::Balanced)) {
+    ImGui::TextWrapped(
+        "Balanced conditions extra intermediate retention on one same-depth,\n"
+        "motion-coherent neighbor. It targets occlusion boundaries, foreground/\n"
+        "background bleeding, silhouette stretching, motion boundaries and depth\n"
+        "discontinuities while favoring narrow foliage, hair and weapon edges.");
+  } else if (silhouette_mode == static_cast<int>(
+                                    mfgunlock::blackwell::SilhouetteGuardMode::Aggressive)) {
+    ImGui::TextWrapped(
+        "Aggressive requires more than one neighbor-equivalent of coherent support,\n"
+        "uses a tighter depth boundary and nonlinear confidence, and permits at\n"
+        "most half of Balanced's extra relaxation. It may clean silhouettes more,\n"
+        "but can reduce persistence or add flicker to very thin geometry.");
+  } else {
     ImGui::TextDisabled(
-        "The guard can run independently; enabling Intermediate retention also\n"
-        "provides the released 0.9 fallback if this provider lacks the guard variant.");
-  } else if (silhouette_guard) {
+        "Off keeps the released 0.9 Intermediate Scatter Retention behavior.");
+  }
+  if (silhouette_mode != static_cast<int>(
+                             mfgunlock::blackwell::SilhouetteGuardMode::Off)) {
     ImGui::TextDisabled(
-        "Guard selected: it supersedes unconditional Intermediate retention for\n"
-        "this session; the 0.9 path remains available as a compatibility fallback.");
+        "The selected guard supersedes unconditional Intermediate retention.\n"
+        "It cannot reconstruct genuinely hidden pixels or repair invalid game motion vectors.");
+    if (intermediate_scatter) {
+      ImGui::TextDisabled(
+          "Intermediate retention remains enabled only as a compatibility fallback.");
+    }
   }
 
   bool validated_warp =
@@ -2627,8 +2667,8 @@ void OnRegisterOverlay(reshade::api::effect_runtime* /*runtime*/) {
           g_thin_geometry_previous_scatter.load(std::memory_order_relaxed) ||
       intermediate_scatter !=
           g_thin_geometry_intermediate_scatter.load(std::memory_order_relaxed) ||
-      silhouette_guard !=
-          g_silhouette_boundary_guard.load(std::memory_order_relaxed)) {
+      static_cast<unsigned int>(silhouette_mode) !=
+          g_silhouette_guard_mode.load(std::memory_order_relaxed)) {
     ImGui::TextDisabled(
         "Thin-geometry selection is saved for the next restart.");
   }
@@ -2663,7 +2703,9 @@ void OnRegisterOverlay(reshade::api::effect_runtime* /*runtime*/) {
              g_thin_geometry_previous_scatter.load(std::memory_order_relaxed) ||
              g_thin_geometry_intermediate_scatter.load(
                  std::memory_order_relaxed) ||
-             g_silhouette_boundary_guard.load(std::memory_order_relaxed)) {
+             g_silhouette_guard_mode.load(std::memory_order_relaxed) !=
+                 static_cast<unsigned int>(
+                     mfgunlock::blackwell::SilhouetteGuardMode::Off)) {
     ImGui::TextDisabled("Waiting for a supported DLSS-G provider (attempt %d).",
                         g_thin_geometry_attempts.load(std::memory_order_relaxed));
   }
@@ -2778,12 +2820,30 @@ void LoadConfig() {
       g_thin_geometry_intermediate_scatter.load(std::memory_order_relaxed),
       std::memory_order_relaxed);
   if (reshade::get_config_value(nullptr, kConfigSection,
-                                "SilhouetteBoundaryGuard", value)) {
-    g_silhouette_boundary_guard.store(value != 0,
-                                      std::memory_order_relaxed);
+                                "BoundaryArtifactMitigationMode", value)) {
+    if (value < static_cast<int>(
+                    mfgunlock::blackwell::SilhouetteGuardMode::Off) ||
+        value > static_cast<int>(
+                    mfgunlock::blackwell::SilhouetteGuardMode::Aggressive)) {
+      value = static_cast<int>(
+          mfgunlock::blackwell::SilhouetteGuardMode::Off);
+    }
+    g_silhouette_guard_mode.store(static_cast<unsigned int>(value),
+                                  std::memory_order_relaxed);
+  } else if (reshade::get_config_value(nullptr, kConfigSection,
+                                       "SilhouetteBoundaryGuard", value)) {
+    // Preserve the boolean used by the first experimental build. Its enabled
+    // value maps to Balanced; the new key takes precedence after the user
+    // explicitly chooses any mode, including Off.
+    g_silhouette_guard_mode.store(
+        static_cast<unsigned int>(
+            value != 0
+                ? mfgunlock::blackwell::SilhouetteGuardMode::Balanced
+                : mfgunlock::blackwell::SilhouetteGuardMode::Off),
+        std::memory_order_relaxed);
   }
-  g_configured_silhouette_boundary_guard.store(
-      g_silhouette_boundary_guard.load(std::memory_order_relaxed),
+  g_configured_silhouette_guard_mode.store(
+      g_silhouette_guard_mode.load(std::memory_order_relaxed),
       std::memory_order_relaxed);
   if (reshade::get_config_value(nullptr, kConfigSection, "RaiseFrameCeiling", value)) {
     g_raise_ceiling.store(value != 0, std::memory_order_relaxed);

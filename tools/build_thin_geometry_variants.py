@@ -215,7 +215,7 @@ _SILHOUETTE_NEIGHBORS = {
 }
 
 
-def _silhouette_support_program(direction: str) -> str:
+def _silhouette_support_program(direction: str, aggressive: bool = False) -> str:
     """Condition only our extra retention on same-surface local support.
 
     The processed-depth threshold of three is already used by this provider's
@@ -225,8 +225,10 @@ def _silhouette_support_program(direction: str) -> str:
     """
     spec = _SILHOUETTE_NEIGHBORS[direction]
     center_x, center_y, center_depth = spec["center"]
+    marker = "AGGRESSIVE_V1" if aggressive else "BALANCED_V1"
+    depth_limit = "0f40000000" if aggressive else "0f40400000"
     lines = [
-        f"// MFGUNLOCK_SILHOUETTE_BOUNDARY_GUARD_V1_{direction.upper()}",
+        f"// MFGUNLOCK_SILHOUETTE_BOUNDARY_GUARD_{marker}_{direction.upper()}",
         spec["reload"].rstrip("\n"),
         "mov.f32 %qgf0, 0f00000000;",
         f"div.approx.ftz.f32 %qgf2, {spec['length']}, %f2;",
@@ -243,22 +245,42 @@ def _silhouette_support_program(direction: str) -> str:
             "setp.gt.f32 %qgp0, %qgf6, 0f00000000;",
             f"sub.ftz.f32 %qgf7, {neighbor_depth}, {center_depth};",
             "abs.ftz.f32 %qgf7, %qgf7;",
-            "setp.lt.and.f32 %qgp0, %qgf7, 0f40400000, %qgp0;",
+            f"setp.lt.and.f32 %qgp0, %qgf7, {depth_limit}, %qgp0;",
             "@!%qgp0 mov.f32 %qgf6, 0f00000000;",
-            "min.ftz.f32 %qgf6, %qgf6, 0f3F800000;",
-            "max.f32 %qgf0, %qgf0, %qgf6;",
         ]
-    lines += [
-        # K_effective stays within [0.5*K_native, K_native]. Unsupported
-        # boundaries therefore return to the provider's native rejection; the
-        # guard never makes that native path stricter.
-        "fma.rn.f32 %qgf11, %qgf0, 0fBF000000, 0f3F800000;",
-        "mul.ftz.f32 %f2, %f2, %qgf11;",
-    ]
+        if aggressive:
+            # Support must exceed one full-neighbor equivalent. Squaring the
+            # excess suppresses marginal boundaries, while summation avoids
+            # introducing another register-heavy top-two sorting network.
+            lines.append("add.f32 %qgf0, %qgf0, %qgf6;")
+        else:
+            lines += [
+                "min.ftz.f32 %qgf6, %qgf6, 0f3F800000;",
+                "max.f32 %qgf0, %qgf0, %qgf6;",
+            ]
+    if aggressive:
+        lines += [
+            "sub.f32 %qgf0, %qgf0, 0f3F800000;",
+            "max.f32 %qgf0, %qgf0, 0f00000000;",
+            "min.f32 %qgf0, %qgf0, 0f3F800000;",
+            "mul.f32 %qgf0, %qgf0, %qgf0;",
+            # At full confidence this permits only half as much additional
+            # relaxation as Balanced: K_effective bottoms out at 0.75*K_native.
+            "fma.rn.f32 %qgf11, %qgf0, 0fBE800000, 0f3F800000;",
+            "mul.ftz.f32 %f2, %f2, %qgf11;",
+        ]
+    else:
+        lines += [
+            # K_effective stays within [0.5*K_native, K_native]. Unsupported
+            # boundaries therefore return to the provider's native rejection;
+            # the guard never makes that native path stricter.
+            "fma.rn.f32 %qgf11, %qgf0, 0fBF000000, 0f3F800000;",
+            "mul.ftz.f32 %f2, %f2, %qgf11;",
+        ]
     return "\n".join(line for line in lines if line) + "\n"
 
 
-def patch_silhouette_boundary_guard(source: str) -> str:
+def _patch_silhouette_boundary_guard(source: str, aggressive: bool) -> str:
     source = replace_once(
         source,
         ".reg .pred %p<656>;\n",
@@ -269,10 +291,18 @@ def patch_silhouette_boundary_guard(source: str) -> str:
         source = replace_once(
             source,
             spec["anchor"],
-            spec["anchor"] + _silhouette_support_program(direction),
+            spec["anchor"] + _silhouette_support_program(direction, aggressive),
             f"{direction} silhouette guard insertion",
         )
     return source
+
+
+def patch_silhouette_boundary_guard(source: str) -> str:
+    return _patch_silhouette_boundary_guard(source, aggressive=False)
+
+
+def patch_silhouette_boundary_guard_aggressive(source: str) -> str:
+    return _patch_silhouette_boundary_guard(source, aggressive=True)
 
 
 def patch_validated_warp_blend(source: str) -> str:
@@ -391,6 +421,8 @@ PATCHERS = {
 EXTRA_PATCHERS = {
     "Kernel_EstimateIntermMvecsScatter": [
         ("geometry_motion_depth", patch_silhouette_boundary_guard),
+        ("geometry_motion_depth_aggressive",
+         patch_silhouette_boundary_guard_aggressive),
     ],
 }
 

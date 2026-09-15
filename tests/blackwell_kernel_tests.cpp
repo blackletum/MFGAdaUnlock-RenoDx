@@ -37,6 +37,7 @@ int main() {
 #if MFGUNLOCK_HAS_GENERATED_THIN_GEOMETRY_CUBINS
   bool found_intermediate_scatter = false;
   bool found_silhouette_guard = false;
+  bool found_aggressive_silhouette_guard = false;
   for (const auto& replacement : generated_thin_geometry::kThinGeometryCubins) {
     CHECK(replacement.data != nullptr);
     CHECK(replacement.size != 0);
@@ -45,18 +46,32 @@ int main() {
     const std::string mechanism = replacement.mechanism;
     CHECK(mechanism == "intermediate_scatter" ||
           mechanism == "geometry_motion" ||
-          mechanism == "geometry_motion_depth");
+          mechanism == "geometry_motion_depth" ||
+          mechanism == "geometry_motion_depth_aggressive");
     found_intermediate_scatter |= mechanism == "intermediate_scatter";
     found_silhouette_guard |= mechanism == "geometry_motion_depth";
+    found_aggressive_silhouette_guard |=
+        mechanism == "geometry_motion_depth_aggressive";
   }
   CHECK(found_intermediate_scatter);
   CHECK(found_silhouette_guard);
+  CHECK(found_aggressive_silhouette_guard);
 #endif
 
   const mfgunlock::blackwell::Result defaults;
   CHECK(!defaults.silhouette_guard_requested);
   CHECK(!defaults.silhouette_guard);
   CHECK(!defaults.silhouette_guard_fallback);
+  CHECK(defaults.silhouette_guard_mode_requested ==
+        mfgunlock::blackwell::SilhouetteGuardMode::Off);
+  CHECK(defaults.silhouette_guard_mode_selected ==
+        mfgunlock::blackwell::SilhouetteGuardMode::Off);
+  CHECK(std::string(mfgunlock::blackwell::SilhouetteGuardMechanism(
+            mfgunlock::blackwell::SilhouetteGuardMode::Balanced)) ==
+        "geometry_motion_depth");
+  CHECK(std::string(mfgunlock::blackwell::SilhouetteGuardMechanism(
+            mfgunlock::blackwell::SilhouetteGuardMode::Aggressive)) ==
+        "geometry_motion_depth_aggressive");
 
   std::cout << "blackwell kernel tests passed\n";
   return EXIT_SUCCESS;

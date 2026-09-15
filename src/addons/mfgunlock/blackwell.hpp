@@ -51,6 +51,35 @@ enum class KernelRole {
   InpaintDecision,
 };
 
+enum class SilhouetteGuardMode : unsigned int {
+  Off = 0,
+  Balanced = 1,
+  Aggressive = 2,
+};
+
+inline constexpr const char* SilhouetteGuardMechanism(
+    SilhouetteGuardMode mode) {
+  switch (mode) {
+    case SilhouetteGuardMode::Balanced:
+      return "geometry_motion_depth";
+    case SilhouetteGuardMode::Aggressive:
+      return "geometry_motion_depth_aggressive";
+    default:
+      return nullptr;
+  }
+}
+
+inline constexpr const char* SilhouetteGuardName(SilhouetteGuardMode mode) {
+  switch (mode) {
+    case SilhouetteGuardMode::Balanced:
+      return "balanced";
+    case SilhouetteGuardMode::Aggressive:
+      return "aggressive";
+    default:
+      return "off";
+  }
+}
+
 inline const char* RoleName(KernelRole role) {
   switch (role) {
     case KernelRole::MotionVector: return "motion-vector estimate";
@@ -74,6 +103,10 @@ struct Result {
   bool silhouette_guard_requested = false;
   bool silhouette_guard = false;
   bool silhouette_guard_fallback = false;
+  SilhouetteGuardMode silhouette_guard_mode_requested =
+      SilhouetteGuardMode::Off;
+  SilhouetteGuardMode silhouette_guard_mode_selected =
+      SilhouetteGuardMode::Off;
   size_t kernels = 0;
 };
 
@@ -329,12 +362,15 @@ inline void Restore(std::vector<Patch>& patches, std::vector<void*>& allocations
 inline bool Apply(HMODULE module, std::vector<Patch>& patches, std::vector<void*>& allocations,
                   Result& result, std::string& detail,
                   bool enable_intermediate_scatter = false,
-                  bool enable_silhouette_guard = false) {
+                  SilhouetteGuardMode silhouette_guard_mode =
+                      SilhouetteGuardMode::Off) {
   patches.clear();
   allocations.clear();
   result = {};
   result.intermediate_scatter_requested = enable_intermediate_scatter;
-  result.silhouette_guard_requested = enable_silhouette_guard;
+  result.silhouette_guard_requested =
+      silhouette_guard_mode != SilhouetteGuardMode::Off;
+  result.silhouette_guard_mode_requested = silhouette_guard_mode;
   detail.clear();
 
   std::vector<internal::Candidate> candidates;
@@ -360,23 +396,41 @@ inline bool Apply(HMODULE module, std::vector<Patch>& patches, std::vector<void*
     const uint8_t* replacement_data = candidate.replacement->data;
     size_t replacement_size = candidate.replacement->size;
 #if MFGUNLOCK_HAS_GENERATED_THIN_GEOMETRY_CUBINS
-    if ((enable_intermediate_scatter || enable_silhouette_guard) &&
+    if ((enable_intermediate_scatter || result.silhouette_guard_requested) &&
         candidate.role == KernelRole::MotionVector) {
       const auto fingerprint = internal::ElfFingerprint{
           candidate.replacement->text, candidate.replacement->shared,
           candidate.replacement->regs};
-      const char* requested_mechanism =
-          enable_silhouette_guard ? "geometry_motion_depth"
-                                  : "intermediate_scatter";
+      const char* requested_mechanism = result.silhouette_guard_requested
+                                            ? SilhouetteGuardMechanism(
+                                                  silhouette_guard_mode)
+                                            : "intermediate_scatter";
       const auto* experimental = internal::MatchScatterVariant(
           fingerprint, candidate.payload, candidate.slot_size,
           requested_mechanism);
       if (experimental != nullptr) {
         replacement_data = experimental->data;
         replacement_size = experimental->size;
-        result.silhouette_guard = enable_silhouette_guard;
-        result.intermediate_scatter = !enable_silhouette_guard;
-      } else if (enable_silhouette_guard && enable_intermediate_scatter) {
+        result.silhouette_guard = result.silhouette_guard_requested;
+        result.silhouette_guard_mode_selected = silhouette_guard_mode;
+        result.intermediate_scatter = !result.silhouette_guard_requested;
+      } else if (silhouette_guard_mode == SilhouetteGuardMode::Aggressive) {
+        // A build that predates the aggressive variant may still contain the
+        // balanced guard. Prefer that guarded path over unconditional retention.
+        experimental = internal::MatchScatterVariant(
+            fingerprint, candidate.payload, candidate.slot_size,
+            SilhouetteGuardMechanism(SilhouetteGuardMode::Balanced));
+        if (experimental != nullptr) {
+          replacement_data = experimental->data;
+          replacement_size = experimental->size;
+          result.silhouette_guard = true;
+          result.silhouette_guard_fallback = true;
+          result.silhouette_guard_mode_selected =
+              SilhouetteGuardMode::Balanced;
+        }
+      }
+      if (experimental == nullptr && result.silhouette_guard_requested &&
+          enable_intermediate_scatter) {
         // The guard is a conditioned replacement for the released retention
         // kernel. If a locally generated table predates it, preserve the 0.9
         // behavior instead of silently dropping all added retention.
@@ -388,6 +442,7 @@ inline bool Apply(HMODULE module, std::vector<Patch>& patches, std::vector<void*
           replacement_size = experimental->size;
           result.intermediate_scatter = true;
           result.silhouette_guard_fallback = true;
+          result.silhouette_guard_mode_selected = SilhouetteGuardMode::Off;
         }
       }
     }
@@ -421,13 +476,16 @@ inline bool Apply(HMODULE module, std::vector<Patch>& patches, std::vector<void*
          << (result.motion_vector ? "yes" : "no") << ", inpaint="
          << (result.inpaint ? "yes" : "no") << ", decision="
          << (result.inpaint_decision ? "yes" : "no") << ", kernels=" << result.kernels;
-  if (enable_silhouette_guard) {
-    stream << "; silhouette boundary guard="
-           << (result.silhouette_guard
-                   ? "applied"
-                   : (result.silhouette_guard_fallback
-                          ? "unsupported (0.9 retention fallback applied)"
-                          : "unsupported (baseline retained)"));
+  if (result.silhouette_guard_requested) {
+    stream << "; silhouette boundary guard=";
+    if (result.silhouette_guard) {
+      if (result.silhouette_guard_fallback) stream << "fallback ";
+      stream << SilhouetteGuardName(result.silhouette_guard_mode_selected);
+    } else if (result.silhouette_guard_fallback) {
+      stream << "unsupported (0.9 retention fallback applied)";
+    } else {
+      stream << "unsupported (baseline retained)";
+    }
   } else if (enable_intermediate_scatter) {
     stream << "; intermediate scatter retention="
            << (result.intermediate_scatter ? "applied" : "unsupported (baseline retained)");
