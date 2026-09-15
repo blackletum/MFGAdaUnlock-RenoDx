@@ -1,7 +1,8 @@
 # Silhouette disocclusion guard experiment
 
-Status: experimental, disabled by default, and not intended for release until
-matched visual captures and frame-pacing tests are complete.
+Status: experimental release candidate. Balanced is the recommended default
+for fresh configurations after matched frame-pacing validation. Existing saved
+choices are preserved, and Off and Aggressive remain available per game.
 
 ## Unified target
 
@@ -93,3 +94,25 @@ Compare guard off/on after a full restart using the same scene, camera motion,
 base FPS, multiplier, DLSS preset and display conditions. Inspect both artifact
 reduction and retained thin detail; disappearance caused only by blur or lost
 geometry is not a quality win.
+
+## Release-gate validation
+
+Matched manual camera runs were captured in Onimusha: Way of the Sword on
+September 15, 2026 with an RTX 4070 SUPER, DLSS-G 310.9.1, Streamline 2.14.1,
+fixed 4x and Hardware: Independent Flip. Off and Balanced both measured a
+3.998x generated/source cadence.
+
+| Metric | Off | Balanced | Difference |
+|---|---:|---:|---:|
+| Average output FPS | 208.11 | 208.44 | +0.159% |
+| Display p50 | 4.4710 ms | 4.4734 ms | +0.054% |
+| Display p95 | 8.8895 ms | 8.8821 ms | -0.083% |
+| Display p99 | 9.6438 ms | 9.8289 ms | +1.919% |
+| Mean instrumented latency | 22.0437 ms | 22.0099 ms | -0.153% |
+| Latency p95 | 29.2175 ms | 29.4150 ms | +0.676% |
+| Generated-frame GPU p95 | 1.5508 ms | 1.5510 ms | +0.013% |
+
+This single matched A/B found no measurable throughput, cadence, mean-latency,
+or generated-frame-cost regression. The small tail-latency differences remain
+within the variability of manually repeated runs and are not a universal
+performance claim. Visual effectiveness remains integration- and scene-specific.
