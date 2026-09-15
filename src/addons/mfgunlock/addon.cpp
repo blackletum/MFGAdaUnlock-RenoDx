@@ -3119,16 +3119,29 @@ void OnRegisterOverlay(reshade::api::effect_runtime* runtime) {
     ImGui::TableSetupColumn("Control", ImGuiTableColumnFlags_WidthStretch, 0.38f);
 
     constexpr const char* kHdrModes[] = {
-        "Native", "Force UI Composition", "Automatic Guard + UI",
-        "Final Color Fallback"};
+        "Native (Most Games)", "Force UI Composition (Advanced)",
+        "Automatic Guard + UI (HDR Compatibility)",
+        "Final Color Fallback (Troubleshooting)"};
     int hdr_mode = static_cast<int>(
         mfgunlock::framecount::g_hdr_compatibility_mode.load(
             std::memory_order_relaxed));
     ImGui::TableNextRow();
     ImGui::TableNextColumn();
+    const char* hdr_summary = "Native game inputs; recommended for most games.";
+    if (hdr_mode == static_cast<int>(
+                        mfgunlock::framecount::HdrCompatibilityMode::kUiRecomposition)) {
+      hdr_summary = "Advanced UI separation; requires correctly matched game buffers.";
+    } else if (hdr_mode == static_cast<int>(
+                               mfgunlock::framecount::HdrCompatibilityMode::kAutomaticHybrid)) {
+      hdr_summary =
+          "HDR compatibility for Hogwarts Legacy, Jusant and Mafia: The Old Country.";
+    } else if (hdr_mode == static_cast<int>(
+                               mfgunlock::framecount::HdrCompatibilityMode::kFinalColorFallback)) {
+      hdr_summary = "Conservative HDR/UI troubleshooting fallback.";
+    }
     SettingLabel(
-        "Frame-generation Inputs", "Controls optional HUD/UI resources.",
-        "Native passes the game's tags unchanged and is best for most games. Automatic Guard + UI validates HUD-less/UI inputs and safely falls back for HDR mismatches. Use Native if HUD elements show artifacts.");
+        "Frame-generation Inputs", hdr_summary,
+        "Native passes the game's tags unchanged and is recommended for most games. Automatic Guard + UI is intended for HDR-related Frame Generation artifacts in games such as Hogwarts Legacy, Jusant and Mafia: The Old Country. It validates HUD-less/UI inputs and falls back safely when their formats or color spaces do not match. If HUD elements show artifacts, return to Native.");
     ImGui::TableNextColumn();
     ImGui::SetNextItemWidth(-1.0f);
     if (ImGui::Combo("##hdr_compatibility", &hdr_mode, kHdrModes,
