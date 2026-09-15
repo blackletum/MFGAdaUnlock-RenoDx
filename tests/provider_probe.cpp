@@ -128,6 +128,27 @@ int wmain(int argc, wchar_t** argv) {
   mfgunlock::thingeometry::Restore(thin_redirects);
   mfgunlock::blackwell::Restore(blackwell_patches, blackwell_allocations);
 
+  mfgunlock::blackwell::Result silhouette_result;
+  std::string silhouette_detail;
+  const bool silhouette_supported = mfgunlock::blackwell::Apply(
+      module, blackwell_patches, blackwell_allocations, silhouette_result,
+      silhouette_detail, true,
+      mfgunlock::blackwell::SilhouetteGuardMode::Aggressive);
+  std::cout << "silhouette_guard_framework_supported="
+            << (silhouette_supported ? "yes" : "no") << '\n';
+  std::cout << "silhouette_guard="
+            << (silhouette_result.silhouette_guard ? "applied" : "not-applied")
+            << '\n';
+  std::cout << "silhouette_guard_fallback="
+            << (silhouette_result.silhouette_guard_fallback ? "yes" : "no")
+            << '\n';
+  std::cout << "silhouette_guard_selected="
+            << mfgunlock::blackwell::SilhouetteGuardName(
+                   silhouette_result.silhouette_guard_mode_selected)
+            << '\n';
+  std::cout << "silhouette_guard_detail=" << silhouette_detail << '\n';
+  mfgunlock::blackwell::Restore(blackwell_patches, blackwell_allocations);
+
   const bool temporal_supported =
       mfgunlock::midpoint::Apply(module, patches, allocation, detail);
   std::cout << "temporal_profile_supported=" << (temporal_supported ? "yes" : "no")

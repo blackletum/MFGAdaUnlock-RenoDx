@@ -184,6 +184,127 @@ def patch_intermediate_scatter(source: str) -> str:
     )
 
 
+_SILHOUETTE_NEIGHBORS = {
+    "curr_to_prev": {
+        "anchor": "fma.rn.ftz.f32 %f14, %f7, %f7, %f157;\n",
+        "center": ("%f7", "%f8", "%f9"),
+        "neighbors": [
+            ("%f55", "%f56", "%f57"),
+            ("%f78", "%f79", "%f80"),
+            ("%f97", "%f98", "%f99"),
+            ("%f120", "%f121", "%f122"),
+        ],
+        "length": "%f14",
+        "reload": "",
+    },
+    "prev_to_curr": {
+        "anchor": "fma.rn.ftz.f32 %f22, %f15, %f15, %f942;\n",
+        "center": ("%f15", "%f16", "%f17"),
+        "neighbors": [
+            ("%f840", "%f841", "%f842"),
+            ("%f863", "%f864", "%f865"),
+            ("%f882", "%f883", "%f884"),
+            ("%f905", "%f906", "%f907"),
+        ],
+        "length": "%f22",
+        "reload": (
+            "ld.param.f32 %f2, "
+            "[Kernel_EstimateIntermMvecsScatter_param_0+120];\n"
+        ),
+    },
+}
+
+
+def _silhouette_support_program(direction: str, aggressive: bool = False) -> str:
+    """Condition only our extra retention on same-surface local support.
+
+    The processed-depth threshold of three is already used by this provider's
+    scatter family. Motion and depth are evaluated in the same shared tile and
+    direction. A single cardinal same-depth, motion-coherent neighbor preserves
+    thin two-pixel structures; no majority/background vote is introduced.
+    """
+    spec = _SILHOUETTE_NEIGHBORS[direction]
+    center_x, center_y, center_depth = spec["center"]
+    marker = "AGGRESSIVE_V1" if aggressive else "BALANCED_V1"
+    depth_limit = "0f40000000" if aggressive else "0f40400000"
+    lines = [
+        f"// MFGUNLOCK_SILHOUETTE_BOUNDARY_GUARD_{marker}_{direction.upper()}",
+        spec["reload"].rstrip("\n"),
+        "mov.f32 %qgf0, 0f00000000;",
+        f"div.approx.ftz.f32 %qgf2, {spec['length']}, %f2;",
+        "max.ftz.f32 %qgf2, %qgf2, 0f3F800000;",
+    ]
+    for neighbor_x, neighbor_y, neighbor_depth in spec["neighbors"]:
+        lines += [
+            f"sub.ftz.f32 %qgf3, {neighbor_x}, {center_x};",
+            f"sub.ftz.f32 %qgf4, {neighbor_y}, {center_y};",
+            "mul.ftz.f32 %qgf5, %qgf4, %qgf4;",
+            "fma.rn.ftz.f32 %qgf5, %qgf3, %qgf3, %qgf5;",
+            "div.approx.ftz.f32 %qgf6, %qgf5, %qgf2;",
+            "sub.ftz.f32 %qgf6, 0f3F800000, %qgf6;",
+            "setp.gt.f32 %qgp0, %qgf6, 0f00000000;",
+            f"sub.ftz.f32 %qgf7, {neighbor_depth}, {center_depth};",
+            "abs.ftz.f32 %qgf7, %qgf7;",
+            f"setp.lt.and.f32 %qgp0, %qgf7, {depth_limit}, %qgp0;",
+            "@!%qgp0 mov.f32 %qgf6, 0f00000000;",
+        ]
+        if aggressive:
+            # Support must exceed one full-neighbor equivalent. Squaring the
+            # excess suppresses marginal boundaries, while summation avoids
+            # introducing another register-heavy top-two sorting network.
+            lines.append("add.f32 %qgf0, %qgf0, %qgf6;")
+        else:
+            lines += [
+                "min.ftz.f32 %qgf6, %qgf6, 0f3F800000;",
+                "max.f32 %qgf0, %qgf0, %qgf6;",
+            ]
+    if aggressive:
+        lines += [
+            "sub.f32 %qgf0, %qgf0, 0f3F800000;",
+            "max.f32 %qgf0, %qgf0, 0f00000000;",
+            "min.f32 %qgf0, %qgf0, 0f3F800000;",
+            "mul.f32 %qgf0, %qgf0, %qgf0;",
+            # At full confidence this permits only half as much additional
+            # relaxation as Balanced: K_effective bottoms out at 0.75*K_native.
+            "fma.rn.f32 %qgf11, %qgf0, 0fBE800000, 0f3F800000;",
+            "mul.ftz.f32 %f2, %f2, %qgf11;",
+        ]
+    else:
+        lines += [
+            # K_effective stays within [0.5*K_native, K_native]. Unsupported
+            # boundaries therefore return to the provider's native rejection;
+            # the guard never makes that native path stricter.
+            "fma.rn.f32 %qgf11, %qgf0, 0fBF000000, 0f3F800000;",
+            "mul.ftz.f32 %f2, %f2, %qgf11;",
+        ]
+    return "\n".join(line for line in lines if line) + "\n"
+
+
+def _patch_silhouette_boundary_guard(source: str, aggressive: bool) -> str:
+    source = replace_once(
+        source,
+        ".reg .pred %p<656>;\n",
+        ".reg .pred %p<656>;\n.reg .pred %qgp<2>;\n.reg .f32 %qgf<12>;\n",
+        "silhouette guard register declaration",
+    )
+    for direction, spec in _SILHOUETTE_NEIGHBORS.items():
+        source = replace_once(
+            source,
+            spec["anchor"],
+            spec["anchor"] + _silhouette_support_program(direction, aggressive),
+            f"{direction} silhouette guard insertion",
+        )
+    return source
+
+
+def patch_silhouette_boundary_guard(source: str) -> str:
+    return _patch_silhouette_boundary_guard(source, aggressive=False)
+
+
+def patch_silhouette_boundary_guard_aggressive(source: str) -> str:
+    return _patch_silhouette_boundary_guard(source, aggressive=True)
+
+
 def patch_validated_warp_blend(source: str) -> str:
     """Apply an independently authored conservative warp-validation experiment.
 
@@ -297,6 +418,14 @@ PATCHERS = {
     "Kernel_BlendCandidatesFused": ("validated_warp_blend", patch_validated_warp_blend, BLACKWELL_ARCH),
 }
 
+EXTRA_PATCHERS = {
+    "Kernel_EstimateIntermMvecsScatter": [
+        ("geometry_motion_depth", patch_silhouette_boundary_guard),
+        ("geometry_motion_depth_aggressive",
+         patch_silhouette_boundary_guard_aggressive),
+    ],
+}
+
 
 def compile_ptx(ptxas: Path, source: str, directory: Path, name: str) -> bytes:
     source_path = directory / f"{name}.ptx"
@@ -403,36 +532,40 @@ def main() -> None:
                             if "+60]" in line or "+120]" in line:
                                 print(f"    {line_number:04d}: {line}")
                 baseline_source = source.replace(".target sm_120", ".target sm_89")
-                patched_source = patcher(baseline_source)
                 baseline = (
                     ada_cubin
                     if source_arch == ADA_ARCH
                     else compile_ptx(args.ptxas, baseline_source, directory, mechanism + "_baseline")
                 )
-                replacement = compile_ptx(args.ptxas, patched_source, directory, mechanism)
-                if len(baseline) > len(ada_cubin):
-                    print(f"  skip {mechanism}: baseline {len(baseline)} > slot {len(ada_cubin)}")
-                    continue
-                if len(replacement) > len(ada_cubin):
-                    print(f"  skip {mechanism}: replacement {len(replacement)} > slot {len(ada_cubin)}")
-                    continue
-                key = (mechanism, fingerprint_elf(ada_cubin), len(ada_cubin), fnv1a64(ada_cubin))
-                if key in seen:
-                    continue
-                seen.add(key)
-                record = {
-                    "mechanism": mechanism,
-                    "source_fingerprint": fingerprint_elf(ada_cubin),
-                    "slot_size": len(ada_cubin),
-                    "source_hash": fnv1a64(ada_cubin),
-                    "replacement": replacement,
-                }
-                records.append(record)
-                print(
-                    f"  ok {mechanism}: fp={record['source_fingerprint']} "
-                    f"slot={len(ada_cubin)} replacement={len(replacement)} "
-                    f"source-fnv={record['source_hash']:016x}"
-                )
+                variants = [(mechanism, patcher)]
+                variants.extend(EXTRA_PATCHERS.get(name, []))
+                for variant_name, variant_patcher in variants:
+                    patched_source = variant_patcher(baseline_source)
+                    replacement = compile_ptx(
+                        args.ptxas, patched_source, directory, variant_name)
+                    if len(baseline) > len(ada_cubin):
+                        print(f"  skip {variant_name}: baseline {len(baseline)} > slot {len(ada_cubin)}")
+                        continue
+                    if len(replacement) > len(ada_cubin):
+                        print(f"  skip {variant_name}: replacement {len(replacement)} > slot {len(ada_cubin)}")
+                        continue
+                    key = (variant_name, fingerprint_elf(ada_cubin), len(ada_cubin), fnv1a64(ada_cubin))
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    record = {
+                        "mechanism": variant_name,
+                        "source_fingerprint": fingerprint_elf(ada_cubin),
+                        "slot_size": len(ada_cubin),
+                        "source_hash": fnv1a64(ada_cubin),
+                        "replacement": replacement,
+                    }
+                    records.append(record)
+                    print(
+                        f"  ok {variant_name}: fp={record['source_fingerprint']} "
+                        f"slot={len(ada_cubin)} replacement={len(replacement)} "
+                        f"source-fnv={record['source_hash']:016x}"
+                    )
     if not records:
         raise SystemExit("no supported experimental variants were generated")
     emit_header(records, args.output, args.provider)

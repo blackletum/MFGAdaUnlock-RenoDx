@@ -8,6 +8,15 @@ if(NOT EXISTS "${RENODX_SOURCE_DIR}/external/Streamline/include/sl.h")
   message(FATAL_ERROR "Set RENODX_SOURCE_DIR to the existing RenoDX build tree")
 endif()
 enable_testing()
+add_executable(runtime_hook_tests runtime_hook_tests.cpp)
+target_compile_definitions(runtime_hook_tests PRIVATE NOMINMAX)
+target_include_directories(runtime_hook_tests SYSTEM PRIVATE
+  "${RENODX_SOURCE_DIR}/external/Streamline/include"
+  "${RENODX_SOURCE_DIR}/external/reshade"
+  "${RENODX_SOURCE_DIR}/external/Detours/include")
+target_link_libraries(runtime_hook_tests PRIVATE
+  "${RENODX_SOURCE_DIR}/external/Detours/lib.X64/detours.lib")
+add_test(NAME runtime_hook_tests COMMAND runtime_hook_tests)
 add_executable(mfgdiagnostics_tests diagnostics_tests.cpp)
 target_compile_definitions(mfgdiagnostics_tests PRIVATE NOMINMAX)
 target_compile_options(mfgdiagnostics_tests PRIVATE /bigobj)
@@ -53,4 +62,9 @@ find_program(POWERSHELL_EXECUTABLE NAMES powershell)
 if(POWERSHELL_EXECUTABLE)
   add_test(NAME capture_comparison COMMAND "${POWERSHELL_EXECUTABLE}" -NoProfile
     -ExecutionPolicy Bypass -File "${CMAKE_CURRENT_SOURCE_DIR}/compare_tests.ps1")
+endif()
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_Interpreter_FOUND)
+  add_test(NAME silhouette_guard
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/silhouette_guard_tests.py")
 endif()

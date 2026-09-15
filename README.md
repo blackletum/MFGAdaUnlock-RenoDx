@@ -60,6 +60,10 @@ compatibility. The repository history and current code attribute these additions
   DLSSG-Transfusion and independently implemented for this addon.
 - The two complementary thin-geometry quality mechanisms enabled together as
   experimental defaults while remaining independently selectable per game.
+- **Boundary Artifact Mitigation**, an independently developed motion/depth
+  confidence guard for silhouette disocclusion, foreground/background bleeding,
+  and edge stretching. Balanced is the recommended default for fresh
+  configurations; Off and Aggressive remain available for per-game testing.
 - Exact DLSS-G 310.9.0/310.9.1 provider and payload validation for the
   thin-geometry paths, with unknown providers failing closed instead of being
   patched speculatively.
@@ -459,6 +463,31 @@ research control. It changes a different rejection path between real frames,
 was unstable in initial game testing, and is disabled by default. It is not
 recommended for normal use.
 
+### Boundary Artifact Mitigation
+
+**Boundary Artifact Mitigation** conditions this fork's additional
+Intermediate Scatter Retention using local motion and processed-depth evidence.
+It targets foreground/background bleeding, silhouette stretching, motion
+boundaries, and depth-discontinuity artifacts without changing Streamline tags,
+the selected multiplier, presentation pacing, Reflex, or Dynamic MFG.
+
+- **Balanced (Recommended)** preserves additional intermediate motion only
+  when at least one nearby same-depth sample provides coherent motion support.
+  It is the default for fresh configurations.
+- **Aggressive** requires stronger multi-neighbor support and stays closer to
+  NVIDIA's native rejection behavior near uncertain boundaries. It may reduce
+  some boundary persistence, but can sacrifice thin detail or introduce
+  flicker in integrations whose depth or motion inputs are noisy.
+- **Off** restores the version 0.9 unconditional Intermediate Scatter
+  Retention behavior.
+
+The guard and Validated Warp Blend operate at different stages and may be used
+together. Existing saved choices, including an explicitly saved Off, are never
+silently overwritten. Changing the mode requires a full game restart. Every
+variant remains protected by exact provider, payload, kernel-role,
+architecture, and slot-size validation; unsupported providers fail closed to a
+validated compatibility path or the baseline kernel.
+
 ## Dynamic Multi Frame Generation
 
 **Use NVIDIA Dynamic MFG** requests Streamline's native
@@ -616,6 +645,7 @@ Written to your `ReShade.ini` under `[RenoDX.MFGUnlock]`:
 | `ThinGeometryIntermediateScatter` | `1` | Experimental recommended default: retains more motion information while constructing intermediate generated frames; keeps the separate depth test and requires the validated full Blackwell path. Disable per game if it adds ghosting or disocclusion artifacts |
 | `ThinGeometryValidatedWarpBlend` | `1` | Experimental recommended default paired with Intermediate scatter retention: validates warped candidates before gradually increasing their blend weight; may reduce thin-detail flicker but can increase temporal persistence. Requires a restart |
 | `ThinGeometryPreviousScatter` | `0` | Unstable advanced research control for a separate previous-to-current motion-rejection path; not recommended for normal use |
+| `BoundaryArtifactMitigationMode` | `1` | `0` restores the 0.9 intermediate-retention behavior, `1` is **Balanced** (recommended default for fresh configurations), and `2` is Aggressive. Existing saved choices are preserved; changing it requires a restart |
 | `ForceMultiplier` | `0` | `0` respects the game's own choice; `2`–`6` requests that exact multiplier, whether it is higher or lower than the game's choice |
 | `DynamicMFG` | `0` | Requests native NVIDIA Dynamic MFG only on the validated 310.9.1 + 2.14.1 D3D12 stack after the provider reports support; takes priority over `ForceMultiplier` while active |
 | `DynamicTargetFPS` | `0` | Dynamic output target; `0` follows display refresh. With VSync active, Streamline ignores a nonzero value and follows refresh instead |
@@ -810,6 +840,20 @@ stutter, universal compatibility, or an addon-overhead difference.
 This Onimusha result validates the tested 4x cadence with both experimental
 quality mechanisms active. It remains one controlled run, not a universal
 performance or artifact-free compatibility claim.
+
+> **Onimusha Boundary Artifact Mitigation A/B (September 15, 2026):** matched
+> manual camera runs compared Off with Balanced on an RTX 4070 SUPER using
+> DLSS-G 310.9.1, Streamline 2.14.1, fixed 4x, and Hardware: Independent Flip.
+> Both runs measured a 3.998x generated/source cadence. Off averaged 208.11 FPS
+> with display-frame p95/p99 of 8.8895/9.6438 ms; Balanced averaged 208.44 FPS
+> with p95/p99 of 8.8821/9.8289 ms. Instrumented mean latency was 22.0437 ms
+> Off and 22.0099 ms Balanced. Generated-frame GPU p95 was 1.5508 ms Off and
+> 1.5510 ms Balanced.
+
+The matched A/B found no measurable throughput, cadence, mean-latency, or
+generated-frame-cost regression from Balanced in this test. The small p99
+differences remain within the variability of single manually repeated runs;
+this is release-gate evidence, not a universal performance guarantee.
 
 Use
 [`Capture-STALKER2-FramePacing.ps1`](src/addons/mfgdiagnostics/Capture-STALKER2-FramePacing.ps1)

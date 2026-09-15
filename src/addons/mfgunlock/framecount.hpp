@@ -831,6 +831,11 @@ inline sl::Result CallSetOptions(const sl::ViewportHandle& viewport,
     }
   }
 
+  // Fixed-multiplier retries and native fallback are owned by
+  // HookedSetOptions. Returning a successful native fallback from here would
+  // hide the rejected override and make telemetry report it as applied.
+  if (override_generated_frames) return result;
+
   if (recompose) {
     g_quality_mode_change_pending.store(false, std::memory_order_release);
     g_ui_recomposition_result.store(static_cast<unsigned int>(result),
