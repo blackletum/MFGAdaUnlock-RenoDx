@@ -2004,6 +2004,19 @@ std::string PackedVersionString(uint64_t version, bool seen) {
   return stream.str();
 }
 
+ThinGeometryModulePatch SelectRelevantThinGeometryResult(
+    const std::vector<ThinGeometryModulePatch>& modules) {
+  if (modules.empty()) return {};
+  const auto applied = std::find_if(
+      modules.rbegin(), modules.rend(), [](const ThinGeometryModulePatch& item) {
+        return item.result.validated_warp_blend.applied ||
+               item.result.previous_scatter.applied ||
+               item.intermediate_scatter.applied ||
+               item.silhouette_boundary_guard.applied;
+      });
+  return applied != modules.rend() ? *applied : modules.back();
+}
+
 void DrawLegacyOverlay(reshade::api::effect_runtime* /*runtime*/) {
   bool gate_patched = false;
   bool midpoint_patched = false;
@@ -2033,9 +2046,8 @@ void DrawLegacyOverlay(reshade::api::effect_runtime* /*runtime*/) {
   thin_geometry_provider_count = g_thin_geometry_modules.size();
   midpoint_detail = g_midpoint_detail;
   blackwell_detail = g_blackwell_detail;
-  if (!g_thin_geometry_modules.empty()) {
-    thin_geometry_last = g_thin_geometry_modules.back();
-  }
+  thin_geometry_last =
+      SelectRelevantThinGeometryResult(g_thin_geometry_modules);
   ReleaseSRWLockShared(&g_provider_maintenance_lock);
   AcquireSRWLockShared(&g_streamline_maintenance_lock);
   ceiling_patched = g_ceiling_patched.load(std::memory_order_relaxed);
@@ -2762,8 +2774,13 @@ void DrawLegacyOverlay(reshade::api::effect_runtime* /*runtime*/) {
 
   ImGui::Separator();
   if (blackwell_patched) {
-    ImGui::TextWrapped("Blackwell framework kernels: %zu provider(s); last result: %s.",
-                       blackwell_provider_count, blackwell_detail.c_str());
+    ImGui::Text("Blackwell framework kernels active: %zu provider(s).",
+                blackwell_provider_count);
+    if (!blackwell_detail.empty()) {
+      ImGui::TextDisabled(
+          "Last inspected candidate (not necessarily active): %s.",
+          blackwell_detail.c_str());
+    }
   } else if (midpoint_patched) {
     ImGui::TextWrapped("Temporal fix: %zu provider(s); last result: %s.",
                        midpoint_provider_count, midpoint_detail.c_str());
@@ -2979,10 +2996,17 @@ void OnRegisterOverlay(reshade::api::effect_runtime* runtime) {
     ImGui::TextWrapped(
         "One or more saved changes will take effect after restarting the game.");
   }
-  if (dynamic_enabled && dynamic_hard_unavailable) {
-    ImGui::TextColored(kUiWarning, "Dynamic MFG compatibility warning");
+  if (dynamic_hard_unavailable) {
+    ImGui::TextColored(
+        kUiWarning,
+        "Dynamic MFG requires DLSS-G 310.9.1 + Streamline 2.14.1.");
+    ImGui::TextDisabled("Detected: DLSS-G %s | Streamline %s",
+                        dlssg_text.c_str(), streamline_text.c_str());
     HelpMarker(
-        "The saved Dynamic MFG option cannot activate with the detected renderer or runtime. Required: D3D12, driver 595.41+, DLSS-G 310.9.1 and Streamline 2.14.1. The addon's fixed/game-controlled path remains available.");
+        "Dynamic MFG additionally requires D3D12 and NVIDIA driver 595.41 or newer. The fixed/game-controlled MFG path remains available when Dynamic cannot activate.");
+  } else if (!dynamic_available) {
+    ImGui::TextDisabled(
+        "Dynamic MFG requirements are checked after the game loads DLSS Frame Generation.");
   }
   if (mfgunlock::framecount::g_dynamic_change_pending.load(
           std::memory_order_acquire) ||
@@ -3003,9 +3027,9 @@ void OnRegisterOverlay(reshade::api::effect_runtime* runtime) {
 
     ImGui::TableNextRow();
     ImGui::TableNextColumn();
-    SettingLabel("Enable MFG Unlock", "Master addon state.",
-                 "Enables the addon on the next game launch. Requires a full game restart.",
-                 "Restart", kUiWarning);
+    SettingLabel(
+        "Enable MFG Unlock", "Applied on the next game launch.",
+        "Changes the master addon state. If you change this option, a restart-required notice will appear at the top of the panel.");
     ImGui::TableNextColumn();
     if (ImGui::Checkbox("##mfg_enabled", &configured_enabled)) {
       g_configured_enabled.store(configured_enabled,
@@ -3350,8 +3374,8 @@ void OnRegisterOverlay(reshade::api::effect_runtime* runtime) {
     thin_geometry_provider_count = g_thin_geometry_modules.size();
     midpoint_detail = g_midpoint_detail;
     blackwell_detail = g_blackwell_detail;
-    if (!g_thin_geometry_modules.empty())
-      thin_geometry_last = g_thin_geometry_modules.back();
+    thin_geometry_last =
+        SelectRelevantThinGeometryResult(g_thin_geometry_modules);
     ReleaseSRWLockShared(&g_provider_maintenance_lock);
 
     ImGui::TextDisabled("RUNTIME");
@@ -3540,8 +3564,17 @@ void OnRegisterOverlay(reshade::api::effect_runtime* runtime) {
     ImGui::SameLine();
     ImGui::TextDisabled("No local paths or credentials are included.");
 
-    if (!blackwell_detail.empty())
+    if (blackwell_patched) {
+      ImGui::Text("Blackwell framework kernels are active on %zu provider(s).",
+                  blackwell_provider_count);
+      if (!blackwell_detail.empty()) {
+        ImGui::TextDisabled(
+            "Last inspected candidate (not necessarily active): %s",
+            blackwell_detail.c_str());
+      }
+    } else if (!blackwell_detail.empty()) {
       ImGui::TextWrapped("Blackwell: %s", blackwell_detail.c_str());
+    }
     if (!midpoint_detail.empty())
       ImGui::TextWrapped("Temporal: %s", midpoint_detail.c_str());
     ImGui::TextDisabled(
