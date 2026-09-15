@@ -3387,17 +3387,19 @@ void OnRegisterOverlay(reshade::api::effect_runtime* runtime) {
       StatusRow("DLSS-G", dlssg_text.c_str(), kUiMuted);
       StatusRow("HDR", hdr_seen ? (hdr_active ? "Yes" : "No") : "Unknown",
                 kUiMuted);
-      StatusRow("VSync capability",
+      StatusRow("Dynamic MFG VSync API",
                 !mfgunlock::framecount::g_vsync_support_seen.load(
                      std::memory_order_acquire)
                     ? "Not reported"
                     : (mfgunlock::framecount::g_vsync_supported.load(
                            std::memory_order_relaxed)
-                           ? "Supported"
-                           : "Unavailable"),
+                           ? "Supported by active runtime"
+                           : "Not supported by active runtime"),
                 kUiMuted);
       ImGui::EndTable();
     }
+    ImGui::TextDisabled(
+        "This reports the Streamline/DLSS-G Dynamic interface, not whether driver VSync is enabled.");
 
     ImGui::Spacing();
     ImGui::TextDisabled("MFG");
