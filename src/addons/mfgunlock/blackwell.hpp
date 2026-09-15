@@ -71,6 +71,9 @@ struct Result {
   bool inpaint_decision = false;
   bool intermediate_scatter_requested = false;
   bool intermediate_scatter = false;
+  bool silhouette_guard_requested = false;
+  bool silhouette_guard = false;
+  bool silhouette_guard_fallback = false;
   size_t kernels = 0;
 };
 
@@ -184,10 +187,12 @@ inline const generated::CubinPatch* MatchReplacement(const ElfFingerprint& finge
 #endif
 
 #if MFGUNLOCK_HAS_GENERATED_THIN_GEOMETRY_CUBINS
-inline const generated_thin_geometry::CubinVariant* MatchIntermediateScatter(
-    const ElfFingerprint& fingerprint, const uint8_t* payload, size_t slot_size) {
+inline const generated_thin_geometry::CubinVariant* MatchScatterVariant(
+    const ElfFingerprint& fingerprint, const uint8_t* payload, size_t slot_size,
+    const char* mechanism) {
+  if (mechanism == nullptr) return nullptr;
   for (const auto& replacement : generated_thin_geometry::kThinGeometryCubins) {
-    if (std::strcmp(replacement.mechanism, "intermediate_scatter") != 0) continue;
+    if (std::strcmp(replacement.mechanism, mechanism) != 0) continue;
     if (replacement.source_text == fingerprint.text &&
         replacement.source_shared == fingerprint.shared &&
         replacement.source_regs == fingerprint.registers &&
@@ -323,11 +328,13 @@ inline void Restore(std::vector<Patch>& patches, std::vector<void*>& allocations
 
 inline bool Apply(HMODULE module, std::vector<Patch>& patches, std::vector<void*>& allocations,
                   Result& result, std::string& detail,
-                  bool enable_intermediate_scatter = false) {
+                  bool enable_intermediate_scatter = false,
+                  bool enable_silhouette_guard = false) {
   patches.clear();
   allocations.clear();
   result = {};
   result.intermediate_scatter_requested = enable_intermediate_scatter;
+  result.silhouette_guard_requested = enable_silhouette_guard;
   detail.clear();
 
   std::vector<internal::Candidate> candidates;
@@ -353,15 +360,35 @@ inline bool Apply(HMODULE module, std::vector<Patch>& patches, std::vector<void*
     const uint8_t* replacement_data = candidate.replacement->data;
     size_t replacement_size = candidate.replacement->size;
 #if MFGUNLOCK_HAS_GENERATED_THIN_GEOMETRY_CUBINS
-    if (enable_intermediate_scatter && candidate.role == KernelRole::MotionVector) {
-      if (const auto* experimental = internal::MatchIntermediateScatter(
-              internal::ElfFingerprint{candidate.replacement->text,
-                                       candidate.replacement->shared,
-                                       candidate.replacement->regs},
-              candidate.payload, candidate.slot_size)) {
+    if ((enable_intermediate_scatter || enable_silhouette_guard) &&
+        candidate.role == KernelRole::MotionVector) {
+      const auto fingerprint = internal::ElfFingerprint{
+          candidate.replacement->text, candidate.replacement->shared,
+          candidate.replacement->regs};
+      const char* requested_mechanism =
+          enable_silhouette_guard ? "geometry_motion_depth"
+                                  : "intermediate_scatter";
+      const auto* experimental = internal::MatchScatterVariant(
+          fingerprint, candidate.payload, candidate.slot_size,
+          requested_mechanism);
+      if (experimental != nullptr) {
         replacement_data = experimental->data;
         replacement_size = experimental->size;
-        result.intermediate_scatter = true;
+        result.silhouette_guard = enable_silhouette_guard;
+        result.intermediate_scatter = !enable_silhouette_guard;
+      } else if (enable_silhouette_guard && enable_intermediate_scatter) {
+        // The guard is a conditioned replacement for the released retention
+        // kernel. If a locally generated table predates it, preserve the 0.9
+        // behavior instead of silently dropping all added retention.
+        experimental = internal::MatchScatterVariant(
+            fingerprint, candidate.payload, candidate.slot_size,
+            "intermediate_scatter");
+        if (experimental != nullptr) {
+          replacement_data = experimental->data;
+          replacement_size = experimental->size;
+          result.intermediate_scatter = true;
+          result.silhouette_guard_fallback = true;
+        }
       }
     }
 #endif
@@ -394,7 +421,14 @@ inline bool Apply(HMODULE module, std::vector<Patch>& patches, std::vector<void*
          << (result.motion_vector ? "yes" : "no") << ", inpaint="
          << (result.inpaint ? "yes" : "no") << ", decision="
          << (result.inpaint_decision ? "yes" : "no") << ", kernels=" << result.kernels;
-  if (enable_intermediate_scatter) {
+  if (enable_silhouette_guard) {
+    stream << "; silhouette boundary guard="
+           << (result.silhouette_guard
+                   ? "applied"
+                   : (result.silhouette_guard_fallback
+                          ? "unsupported (0.9 retention fallback applied)"
+                          : "unsupported (baseline retained)"));
+  } else if (enable_intermediate_scatter) {
     stream << "; intermediate scatter retention="
            << (result.intermediate_scatter ? "applied" : "unsupported (baseline retained)");
   }

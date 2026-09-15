@@ -155,6 +155,11 @@ std::atomic_bool g_configured_thin_geometry_previous_scatter{false};
 // validated warp blend by default; either mechanism can still be tested alone.
 std::atomic_bool g_thin_geometry_intermediate_scatter{true};
 std::atomic_bool g_configured_thin_geometry_intermediate_scatter{true};
+// Optional replacement for unconditional intermediate retention. It conditions
+// only our additional relaxation on a local same-depth, motion-coherent cluster
+// and otherwise returns to the provider's native rejection behavior.
+std::atomic_bool g_silhouette_boundary_guard{false};
+std::atomic_bool g_configured_silhouette_boundary_guard{false};
 // Raising the plugin's own clamp broke GTA V Enhanced -- its 2.9.1.0 plugin was
 // only ever shipped bounded at 3, and lifting that is not the same as it being
 // able to cope. Off by default; updating the plugin is the sound fix.
@@ -770,6 +775,7 @@ struct ThinGeometryModulePatch {
   std::vector<mfgunlock::thingeometry::Redirect> redirects;
   mfgunlock::thingeometry::Result result;
   mfgunlock::thingeometry::MechanismResult intermediate_scatter;
+  mfgunlock::thingeometry::MechanismResult silhouette_boundary_guard;
 };
 std::vector<ThinGeometryModulePatch> g_thin_geometry_modules;
 std::atomic_bool g_thin_geometry_patched{false};
@@ -778,7 +784,8 @@ std::atomic<int> g_thin_geometry_attempts{0};
 bool ThinGeometryRequested() {
   return g_thin_geometry_validated_warp_blend.load(std::memory_order_relaxed) ||
          g_thin_geometry_previous_scatter.load(std::memory_order_relaxed) ||
-         g_thin_geometry_intermediate_scatter.load(std::memory_order_relaxed);
+         g_thin_geometry_intermediate_scatter.load(std::memory_order_relaxed) ||
+         g_silhouette_boundary_guard.load(std::memory_order_relaxed);
 }
 
 bool ModuleHasThinGeometryResult(HMODULE mod) {
@@ -808,8 +815,12 @@ bool PatchBlackwellInModule(HMODULE mod) {
   const bool enable_intermediate_scatter =
       g_thin_geometry_intermediate_scatter.load(std::memory_order_relaxed) &&
       supported_thin_geometry_provider;
+  const bool enable_silhouette_guard =
+      g_silhouette_boundary_guard.load(std::memory_order_relaxed) &&
+      supported_thin_geometry_provider;
   if (!mfgunlock::blackwell::Apply(mod, patches, allocations, result, detail,
-                                   enable_intermediate_scatter)) {
+                                   enable_intermediate_scatter,
+                                   enable_silhouette_guard)) {
     g_blackwell_detail = detail;
     return false;
   }
@@ -865,8 +876,13 @@ void PatchThinGeometryInModule(HMODULE mod) {
                                 module_result.result,
                                 module_result.provider_version);
 
+  const bool silhouette_guard_requested =
+      g_silhouette_boundary_guard.load(std::memory_order_relaxed);
   module_result.intermediate_scatter.requested =
-      g_thin_geometry_intermediate_scatter.load(std::memory_order_relaxed);
+      g_thin_geometry_intermediate_scatter.load(std::memory_order_relaxed) &&
+      !silhouette_guard_requested;
+  module_result.silhouette_boundary_guard.requested =
+      silhouette_guard_requested;
   if (module_result.intermediate_scatter.requested) {
     std::string provider_reason;
     if (!mfgunlock::thingeometry::IsSupportedProvider(
@@ -888,6 +904,38 @@ void PatchThinGeometryInModule(HMODULE mod) {
             blackwell->result.intermediate_scatter
                 ? "exact original Ada cubin hash matched the generated bounded-retention variant"
                 : "exact intermediate-scatter variant did not match; baseline Blackwell cubin retained";
+      }
+    }
+  }
+
+  if (module_result.silhouette_boundary_guard.requested) {
+    std::string provider_reason;
+    if (!mfgunlock::thingeometry::IsSupportedProvider(
+            mod, module_result.provider_version, provider_reason)) {
+      module_result.silhouette_boundary_guard.detail = provider_reason;
+    } else {
+      const auto blackwell = std::find_if(
+          g_blackwell_modules.begin(), g_blackwell_modules.end(),
+          [mod](const BlackwellModulePatch& patch) { return patch.module == mod; });
+      if (blackwell == g_blackwell_modules.end()) {
+        module_result.silhouette_boundary_guard.detail =
+            "requires the exact full Blackwell motion-vector path; current temporal fallback retained";
+      } else {
+        module_result.silhouette_boundary_guard.detected =
+            blackwell->result.silhouette_guard ||
+            blackwell->result.silhouette_guard_fallback;
+        module_result.silhouette_boundary_guard.applied =
+            blackwell->result.silhouette_guard;
+        if (blackwell->result.silhouette_guard) {
+          module_result.silhouette_boundary_guard.detail =
+              "exact motion-vector cubin matched the same-depth local-support variant";
+        } else if (blackwell->result.silhouette_guard_fallback) {
+          module_result.silhouette_boundary_guard.detail =
+              "guard variant unavailable; released 0.9 intermediate retention was applied as a safe fallback";
+        } else {
+          module_result.silhouette_boundary_guard.detail =
+              "exact guard variant did not match; baseline Blackwell cubin retained";
+        }
       }
     }
   }
@@ -914,10 +962,18 @@ void PatchThinGeometryInModule(HMODULE mod) {
         "Blackwell EstimateIntermMvecsScatter in-place cubin selection",
         module_result.intermediate_scatter);
   }
+  if (module_result.silhouette_boundary_guard.requested) {
+    LogThinGeometryMechanism(
+        module_path, module_result.provider_version,
+        "silhouette disocclusion guard",
+        "Blackwell EstimateIntermMvecsScatter same-depth local-support selection",
+        module_result.silhouette_boundary_guard);
+  }
 
   if (module_result.result.validated_warp_blend.applied ||
       module_result.result.previous_scatter.applied ||
-      module_result.intermediate_scatter.applied) {
+      module_result.intermediate_scatter.applied ||
+      module_result.silhouette_boundary_guard.applied) {
     g_thin_geometry_patched.store(true, std::memory_order_release);
   }
   g_thin_geometry_modules.push_back(std::move(module_result));
@@ -2502,6 +2558,33 @@ void OnRegisterOverlay(reshade::api::effect_runtime* /*runtime*/) {
       "test stays active. May preserve fences, foliage and moving edges; disable it\n"
       "if a game shows added trails, ghosting or disocclusion artifacts.");
 
+  bool silhouette_guard =
+      g_configured_silhouette_boundary_guard.load(std::memory_order_relaxed);
+  if (ImGui::Checkbox(
+          "Silhouette disocclusion guard (Experimental)##silhouette_guard",
+          &silhouette_guard)) {
+    g_configured_silhouette_boundary_guard.store(
+        silhouette_guard, std::memory_order_relaxed);
+    reshade::set_config_value(nullptr, kConfigSection,
+                              "SilhouetteBoundaryGuard",
+                              silhouette_guard ? 1 : 0);
+  }
+  ImGui::TextWrapped(
+      "Off by default. When enabled, it replaces unconditional intermediate\n"
+      "retention with a same-depth, motion-coherent local-support test. This may\n"
+      "reduce foreground/background bleeding and stretching around moving\n"
+      "silhouettes. It cannot reconstruct genuinely hidden pixels and may trade\n"
+      "some thin-detail persistence for cleaner occlusion boundaries.");
+  if (silhouette_guard && !intermediate_scatter) {
+    ImGui::TextDisabled(
+        "The guard can run independently; enabling Intermediate retention also\n"
+        "provides the released 0.9 fallback if this provider lacks the guard variant.");
+  } else if (silhouette_guard) {
+    ImGui::TextDisabled(
+        "Guard selected: it supersedes unconditional Intermediate retention for\n"
+        "this session; the 0.9 path remains available as a compatibility fallback.");
+  }
+
   bool validated_warp =
       g_configured_thin_geometry_validated_warp_blend.load(
           std::memory_order_relaxed);
@@ -2543,7 +2626,9 @@ void OnRegisterOverlay(reshade::api::effect_runtime* /*runtime*/) {
       previous_scatter !=
           g_thin_geometry_previous_scatter.load(std::memory_order_relaxed) ||
       intermediate_scatter !=
-          g_thin_geometry_intermediate_scatter.load(std::memory_order_relaxed)) {
+          g_thin_geometry_intermediate_scatter.load(std::memory_order_relaxed) ||
+      silhouette_guard !=
+          g_silhouette_boundary_guard.load(std::memory_order_relaxed)) {
     ImGui::TextDisabled(
         "Thin-geometry selection is saved for the next restart.");
   }
@@ -2571,11 +2656,14 @@ void OnRegisterOverlay(reshade::api::effect_runtime* /*runtime*/) {
                      thin_geometry_last.result.previous_scatter);
     show_thin_result("Intermediate scatter retention",
                      thin_geometry_last.intermediate_scatter);
+    show_thin_result("Silhouette disocclusion guard",
+                     thin_geometry_last.silhouette_boundary_guard);
   } else if (g_thin_geometry_validated_warp_blend.load(
                  std::memory_order_relaxed) ||
              g_thin_geometry_previous_scatter.load(std::memory_order_relaxed) ||
              g_thin_geometry_intermediate_scatter.load(
-                 std::memory_order_relaxed)) {
+                 std::memory_order_relaxed) ||
+             g_silhouette_boundary_guard.load(std::memory_order_relaxed)) {
     ImGui::TextDisabled("Waiting for a supported DLSS-G provider (attempt %d).",
                         g_thin_geometry_attempts.load(std::memory_order_relaxed));
   }
@@ -2688,6 +2776,14 @@ void LoadConfig() {
   }
   g_configured_thin_geometry_intermediate_scatter.store(
       g_thin_geometry_intermediate_scatter.load(std::memory_order_relaxed),
+      std::memory_order_relaxed);
+  if (reshade::get_config_value(nullptr, kConfigSection,
+                                "SilhouetteBoundaryGuard", value)) {
+    g_silhouette_boundary_guard.store(value != 0,
+                                      std::memory_order_relaxed);
+  }
+  g_configured_silhouette_boundary_guard.store(
+      g_silhouette_boundary_guard.load(std::memory_order_relaxed),
       std::memory_order_relaxed);
   if (reshade::get_config_value(nullptr, kConfigSection, "RaiseFrameCeiling", value)) {
     g_raise_ceiling.store(value != 0, std::memory_order_relaxed);
