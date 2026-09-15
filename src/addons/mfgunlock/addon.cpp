@@ -158,12 +158,14 @@ std::atomic_bool g_configured_thin_geometry_intermediate_scatter{true};
 // Optional replacement for unconditional intermediate retention. It conditions
 // only our additional relaxation on a local same-depth, motion-coherent cluster
 // and otherwise returns to the provider's native rejection behavior.
+// Fresh configurations use the recommended Balanced mode. LoadConfig preserves
+// every valid current or legacy selection, including an explicitly saved Off.
 std::atomic<unsigned int> g_silhouette_guard_mode{
     static_cast<unsigned int>(
-        mfgunlock::blackwell::SilhouetteGuardMode::Off)};
+        mfgunlock::blackwell::SilhouetteGuardMode::Balanced)};
 std::atomic<unsigned int> g_configured_silhouette_guard_mode{
     static_cast<unsigned int>(
-        mfgunlock::blackwell::SilhouetteGuardMode::Off)};
+        mfgunlock::blackwell::SilhouetteGuardMode::Balanced)};
 // Raising the plugin's own clamp broke GTA V Enhanced -- its 2.9.1.0 plugin was
 // only ever shipped bounded at 3, and lifting that is not the same as it being
 // able to cope. Off by default; updating the plugin is the sound fix.
@@ -3683,7 +3685,7 @@ void LoadConfig() {
         value > static_cast<int>(
                     mfgunlock::blackwell::SilhouetteGuardMode::Aggressive)) {
       value = static_cast<int>(
-          mfgunlock::blackwell::SilhouetteGuardMode::Off);
+          mfgunlock::blackwell::SilhouetteGuardMode::Balanced);
     }
     g_silhouette_guard_mode.store(static_cast<unsigned int>(value),
                                   std::memory_order_relaxed);
