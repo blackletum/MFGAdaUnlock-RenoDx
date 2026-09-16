@@ -173,6 +173,7 @@ replace or claim authorship of either original contribution.
 | Mafia: The Old Country | Working with HDR fix |
 | Dying Light: The Beast | Working |
 | Onimusha: Way of the Sword | Working |
+| Monster Hunter Wilds | Working |
 
 These are the games personally tested with this fork; this is not a claim of
 universal compatibility. Results may vary with the game version, DLSS and
