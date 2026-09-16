@@ -1,5 +1,9 @@
 # MFG Unlock
 
+<p align="center">
+  <a href="https://ko-fi.com/mavismmg"><img src="https://img.shields.io/badge/Support%20me%20on-Ko--fi-FF5E5B?logo=ko-fi&amp;logoColor=white" alt="Support me on Ko-fi"></a>
+</p>
+
 A [ReShade](https://reshade.me/) addon that enables **DLSS multi-frame generation
 (3x / 4x and above) on GeForce RTX 40-series** cards, which NVIDIA ships gated to
 RTX 50-series only — and corrects the frame interpolation so the extra frames
@@ -109,6 +113,9 @@ compatibility. The repository history and current code attribute these additions
 
 These additions extend Dreamt's addon and dashdogy's research; they do not
 replace or claim authorship of either original contribution.
+
+If you'd like to support ongoing compatibility work on this fork, you can do so
+through [my Ko-fi](https://ko-fi.com/mavismmg).
 
 ## Contents
 
