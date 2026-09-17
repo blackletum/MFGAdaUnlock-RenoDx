@@ -154,7 +154,6 @@ through [my Ko-fi](https://ko-fi.com/mavismmg).
 | Dragon's Dogma 2 | Working |
 | The Blood of Dawnwalker | Maybe |
 | Starfield | Working |
-| Star Wars Outlaws | Working |
 | Marvel's Spider-Man 2 | Working |
 | Mortal Shell II | Working |
 | Resonance: A Plague Tale Legacy | Working |
