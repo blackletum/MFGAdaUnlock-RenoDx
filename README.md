@@ -939,7 +939,7 @@ They are developer tools and are not required for normal use.
   stages. This fork's experimental full-kernel path follows his proven
   precompiled-cubin, exact-fingerprint, in-place replacement method; its
   release payload table is generated with his `rebuild_cubins.py` workflow.
-- Tony Joaca, author of DLSSG-Transfusion, publicly identified
+- [Tony Joaca](https://github.com/TonyJoaca/DLSSG-Transfusion), author of DLSSG-Transfusion, publicly identified
   `Kernel_BlendCandidatesFused` as the useful intervention point behind his
   `qualityValidWarp` quality option. That research informed this fork's
   separately implemented and more conservative **Validated warp blend**
