@@ -305,6 +305,117 @@ def patch_silhouette_boundary_guard_aggressive(source: str) -> str:
     return _patch_silhouette_boundary_guard(source, aggressive=True)
 
 
+def patch_refined_geometry(source: str) -> str:
+    # Keep best-neighbor support (no majority vote that erases thin geometry).
+    # Only the last unit of the existing processed-depth window is tapered.
+    source = patch_silhouette_boundary_guard(source)
+    source = source.replace("max.ftz.f32 %qgf2, %qgf2, 0f3F800000;",
+                            "max.ftz.f32 %qgf2, %qgf2, 0f3F800000;\n"
+                            "rcp.approx.ftz.f32 %qgf2, %qgf2;")
+    source = source.replace("div.approx.ftz.f32 %qgf6, %qgf5, %qgf2;",
+                            "mul.ftz.f32 %qgf6, %qgf5, %qgf2;")
+    source = source.replace("@!%qgp0 mov.f32 %qgf6, 0f00000000;",
+                            "sub.sat.f32 %qgf7, 0f40400000, %qgf7;\n"
+                            "min.f32 %qgf6, %qgf6, %qgf7;\n"
+                            "@!%qgp0 mov.f32 %qgf6, 0f00000000;")
+    # Saturated depth support already expresses the ordered depth window and
+    # bounds the combined support to one. Remove the now redundant operations.
+    source = source.replace("setp.lt.and.f32 %qgp0, %qgf7, 0f40400000, %qgp0;\n", "")
+    source = source.replace("min.ftz.f32 %qgf6, %qgf6, 0f3F800000;\n", "")
+    return source.replace("BALANCED_V1", "REFINED_V1")
+
+
+def patch_geometry_confidence_v2(source: str) -> str:
+    """Smooth only the final local-support confidence, not native rejection.
+
+    Replacing the predicate/zero pair with a saturating subtraction is
+    equivalent for finite nonnegative squared motion error and preserves
+    NaN -> zero. It also makes room for one smoothstep per direction without
+    adding neighbor reads or a multi-neighbor vote that loses thin geometry.
+    """
+    source = patch_refined_geometry(source)
+    old = (
+        "sub.ftz.f32 %qgf6, 0f3F800000, %qgf6;\n"
+        "setp.gt.f32 %qgp0, %qgf6, 0f00000000;\n"
+    )
+    if source.count(old) != 8 or source.count("@!%qgp0 mov.f32 %qgf6, 0f00000000;\n") != 8:
+        raise ValueError("geometry confidence V2: motion-support anchors changed")
+    source = source.replace(old, "sub.ftz.sat.f32 %qgf6, 0f3F800000, %qgf6;\n")
+    source = source.replace("@!%qgp0 mov.f32 %qgf6, 0f00000000;\n", "")
+    old_final = (
+        "fma.rn.f32 %qgf11, %qgf0, 0fBF000000, 0f3F800000;\n"
+    )
+    if source.count(old_final) != 2:
+        raise ValueError("geometry confidence V2: final support anchors changed")
+    smooth = (
+        "// MFGUNLOCK_GEOMETRY_CONFIDENCE_V2\n"
+        "fma.rn.f32 %qgf6, %qgf0, 0fC0000000, 0f40400000;\n"
+        "mul.f32 %qgf0, %qgf0, %qgf0;\n"
+        "mul.f32 %qgf0, %qgf0, %qgf6;\n"
+    )
+    return source.replace(old_final, smooth + old_final)
+
+
+def patch_adaptive_geometry_v1(source: str) -> str:
+    """Add foreground/background asymmetry without new reads or scatter taps.
+
+    The provider normalizes both conventional and reversed depth so larger
+    processed depth is nearer.  V2 used abs(neighbor-center), which treats the
+    newly revealed background and the moving foreground identically.  This
+    variant keeps full foreground-side support (center nearer than neighbor)
+    while retaining the existing 2..3-unit taper when a nearer neighbor can
+    occlude a background center.  Motion coherence and best-neighbor thin-
+    geometry preservation remain mandatory.
+
+    Scatter coverage itself is already signed and motion-adaptive in the
+    provider (bounded X/Y extents and directional atomic writes).  Reusing it
+    avoids extra taps, collisions and GPU work; this patch only changes whether
+    our extra retention may accompany those native directional writes.
+    """
+    source = patch_geometry_confidence_v2(source)
+    registers = ".reg .f32 %qgf<12>;\n"
+    source = replace_once(
+        source, registers,
+        registers +
+        "// MFGUNLOCK_ASYMMETRIC_DISOCCLUSION_V1\n"
+        "// MFGUNLOCK_NATIVE_DIRECTIONAL_SCATTER_GATED_V1\n",
+        "adaptive geometry marker",
+    )
+    symmetric = (
+        "abs.ftz.f32 %qgf7, %qgf7;\n"
+        "sub.sat.f32 %qgf7, 0f40400000, %qgf7;\n"
+    )
+    asymmetric = (
+        "// Signed processed depth: positive means a nearer neighbor.\n"
+        "sub.sat.f32 %qgf7, 0f40400000, %qgf7;\n"
+    )
+    if source.count(symmetric) != 8:
+        raise ValueError("adaptive geometry: signed-depth anchors changed")
+    return source.replace(symmetric, asymmetric)
+
+
+def patch_adaptive_inpaint_decision_v1(source: str) -> str:
+    """Fail closed when the provider's inpaint-need mask is unordered.
+
+    For every finite mask value this is bit-for-bit the same decision as the
+    Blackwell source.  NaN previously compared false and was therefore treated
+    as a valid pixel; the unordered comparison sends it to the provider's
+    existing inpaint neighborhood instead. No radius, buffer or output changes.
+    """
+    anchors = (
+        "setp.gt.ftz.f32 %p6, %f39, 0f00000000;\n",
+        "setp.gt.ftz.f32 %p13, %f43, 0f00000000;\n",
+    )
+    for index, anchor in enumerate(anchors):
+        source = replace_once(
+            source, anchor,
+            ("// MFGUNLOCK_INPAINT_DECISION_NONFINITE_V1\n" if index == 0 else "") +
+            anchor.replace("setp.gt.", "setp.gtu."),
+            f"inpaint decision mask {index}",
+        )
+    return source
+
+
 def patch_validated_warp_blend(source: str) -> str:
     """Apply an independently authored conservative warp-validation experiment.
 
@@ -412,14 +523,50 @@ sub.f32 %qf4, %f133, %f121;
     return replace_once(source, anchor, program + anchor, "blend UIR insertion point")
 
 
+def patch_refined_blend(source: str) -> str:
+    header = Path(__file__).resolve().parents[1] / "src/addons/mfgunlock/quality_refinement.hpp"
+    fragment = header.read_text(encoding="utf-8").split('R"PTX(', 1)[1].split(')PTX"', 1)[0]
+    source = patch_validated_warp_blend(source)
+    anchor = "min.f32 %qf1, %qf1, 0f3F800000;\n"
+    return replace_once(source, anchor, anchor + fragment, "smooth confidence weights")
+
+
+def patch_refined_border_blend(source: str) -> str:
+    smooth_header = Path(__file__).resolve().parents[1] / "src/addons/mfgunlock/quality_refinement.hpp"
+    smooth = smooth_header.read_text(encoding="utf-8").split('R"PTX(', 1)[1].split(')PTX"', 1)[0]
+    border_header = Path(__file__).resolve().parents[1] / "src/addons/mfgunlock/quality_border.hpp"
+    border = border_header.read_text(encoding="utf-8").split('R"PTX(', 1)[1].split(')PTX"', 1)[0]
+    source = patch_refined_blend(source)
+    return replace_once(source, smooth, smooth + border, "symmetric border confidence")
+
+
+def patch_adaptive_blend(source: str) -> str:
+    source = patch_refined_border_blend(source)
+    header = Path(__file__).resolve().parents[1] / "src/addons/mfgunlock/adaptive_quality.hpp"
+    arbitration = header.read_text(encoding="utf-8").split('R"PTX(', 1)[1].split(')PTX"', 1)[0]
+    border_header = Path(__file__).resolve().parents[1] / "src/addons/mfgunlock/quality_border.hpp"
+    border = border_header.read_text(encoding="utf-8").split('R"PTX(', 1)[1].split(')PTX"', 1)[0]
+    return replace_once(source, border, border + arbitration,
+                        "candidate arbitration")
+
+
 PATCHERS = {
     "Kernel_EstimatePrev2CurrScatter": ("previous_scatter", patch_previous_scatter, ADA_ARCH),
     "Kernel_EstimateIntermMvecsScatter": ("intermediate_scatter", patch_intermediate_scatter, BLACKWELL_ARCH),
     "Kernel_BlendCandidatesFused": ("validated_warp_blend", patch_validated_warp_blend, BLACKWELL_ARCH),
+    "Kernel_OutputPull": ("adaptive_inpaint_decision_v1", patch_adaptive_inpaint_decision_v1, BLACKWELL_ARCH),
 }
 
 EXTRA_PATCHERS = {
+    "Kernel_BlendCandidatesFused": [
+        ("validated_warp_blend_refined", patch_refined_blend),
+        ("validated_warp_blend_refined_border", patch_refined_border_blend),
+        ("adaptive_quality_blend_v1", patch_adaptive_blend),
+    ],
     "Kernel_EstimateIntermMvecsScatter": [
+        ("adaptive_quality_geometry_v1", patch_adaptive_geometry_v1),
+        ("geometry_support_smooth_v2", patch_geometry_confidence_v2),
+        ("geometry_motion_depth_refined", patch_refined_geometry),
         ("geometry_motion_depth", patch_silhouette_boundary_guard),
         ("geometry_motion_depth_aggressive",
          patch_silhouette_boundary_guard_aggressive),
@@ -432,12 +579,14 @@ def compile_ptx(ptxas: Path, source: str, directory: Path, name: str) -> bytes:
     cubin_path = directory / f"{name}.cubin"
     source_path.write_text(source, encoding="ascii", newline="\n")
     result = subprocess.run(
-        [str(ptxas), "-arch=sm_89", "-O3", str(source_path), "-o", str(cubin_path)],
+        [str(ptxas), "-arch=sm_89", "-O3", "-v", str(source_path), "-o", str(cubin_path)],
         capture_output=True,
         text=True,
     )
     if result.returncode:
         raise RuntimeError(f"ptxas failed for {name}:\n{result.stderr}")
+    print(f"  compiler resources [{name}]:\n{result.stdout.strip()}\n{result.stderr.strip()}")
+    print(f"  ELF text/shared/registers [{name}]: {fingerprint_elf(cubin_path.read_bytes())}")
     return cubin_path.read_bytes()
 
 

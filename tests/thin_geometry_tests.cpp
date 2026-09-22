@@ -36,6 +36,35 @@ int main() {
   CHECK(blend.find(".reg .pred %qv<7>;") != std::string::npos);
   CHECK(blend.find("0f3F59999A") != std::string::npos);
   CHECK(blend.find("ld.param.u8 %rs8, [%rd6+220];") != std::string::npos);
+  g_refinement_enabled = true;
+  std::string refined = ".entry Kernel_BlendCandidatesFused(\n.reg .pred %p<260>;\nld.param.u8 %rs8, [%rd6+220];\n";
+  CHECK(internal::RewriteValidatedWarpBlend(refined, why));
+  CHECK(refined.find(mfgunlock::qualityrefinement::kBlendWeights) != std::string::npos);
+  g_border_confidence_enabled = true;
+  std::string border = ".entry Kernel_BlendCandidatesFused(\n.reg .pred %p<260>;\nld.param.u8 %rs8, [%rd6+220];\n";
+  CHECK(internal::RewriteValidatedWarpBlend(border, why));
+  CHECK(border.find(mfgunlock::qualityrefinement::kBlendWeights) != std::string::npos);
+  CHECK(border.find(mfgunlock::qualityborder::kBorderWeights) != std::string::npos);
+  CHECK(border.find("MFGUNLOCK_BORDER_CONFIDENCE_V1") != std::string::npos);
+  CHECK(border.find("sub.f32 %qf5, %qf0, %qf8;") != std::string::npos);
+  CHECK(border.find("sub.f32 %qf5, %qf1, %qf10;") != std::string::npos);
+  g_border_confidence_enabled = false;
+  g_refinement_enabled = false;
+  g_adaptive_quality_enabled = true;
+  std::string adaptive = ".entry Kernel_BlendCandidatesFused(\n.reg .pred %p<260>;\nld.param.u8 %rs8, [%rd6+220];\n";
+  CHECK(internal::RewriteValidatedWarpBlend(adaptive, why));
+  CHECK(adaptive.find(mfgunlock::qualityrefinement::kBlendWeights) != std::string::npos);
+  CHECK(adaptive.find(mfgunlock::qualityborder::kBorderWeights) != std::string::npos);
+  CHECK(adaptive.find(mfgunlock::adaptivequality::kCandidateArbitration) != std::string::npos);
+  CHECK(adaptive.find("MFGUNLOCK_CANDIDATE_ARBITRATION_V1") != std::string::npos);
+  g_adaptive_quality_enabled = false;
+
+  const float unchanged = mfgunlock::adaptivequality::ArbitrateExtraWeight(
+      0.2f, 0.85f, 0.04f, 1.0f);
+  CHECK(unchanged > 0.849f && unchanged <= 0.85f);
+  const float attenuated = mfgunlock::adaptivequality::ArbitrateExtraWeight(
+      0.2f, 0.85f, 0.15f, 1.0f);
+  CHECK(attenuated >= 0.2f && attenuated < unchanged);
 
   IMAGE_NT_HEADERS64 headers{};
   headers.FileHeader.TimeDateStamp = 0x6A986031u;

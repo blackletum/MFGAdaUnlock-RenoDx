@@ -30,8 +30,19 @@
 #include <sstream>
 #include <string>
 #include <vector>
+#include "adaptive_quality.hpp"
+#include "quality_border.hpp"
+#include "quality_refinement.hpp"
 
 namespace mfgunlock::thingeometry {
+// Set once during addon initialization, before provider discovery starts.
+inline bool g_refinement_enabled = false;
+// Developer-only, restart-scoped border experiment. Requires the refined blend.
+inline bool g_border_confidence_enabled = false;
+// Unified experiment. It includes smooth confidence and the symmetric border
+// taper, then adds forward/inverse candidate arbitration. Kept separate from
+// the earlier component toggles so saved configurations retain their meaning.
+inline bool g_adaptive_quality_enabled = false;
 
 enum class Mechanism {
   ValidatedWarpBlend,
@@ -317,7 +328,31 @@ sub.f32 %qf4, %f133, %f121;
 @%qv1 fma.rn.f32 %f42, %qf1, %qf3, %f120;
 @%qv1 fma.rn.f32 %f41, %qf1, %qf4, %f121;
 )ptx";
-  return ReplaceOnce(ptx, kInsertion, std::string(kProgram) + kInsertion, why);
+  std::string program(kProgram);
+  const bool use_refinement =
+      g_refinement_enabled || g_adaptive_quality_enabled;
+  const bool use_border =
+      g_adaptive_quality_enabled ||
+      (g_refinement_enabled && g_border_confidence_enabled);
+  if (use_refinement) {
+    constexpr const char* anchor = "min.f32 %qf1, %qf1, 0f3F800000;\n";
+    if (!ReplaceOnce(program, anchor, std::string(anchor) +
+                     qualityrefinement::kBlendWeights, why)) return false;
+    if (use_border &&
+        !ReplaceOnce(program, qualityrefinement::kBlendWeights,
+                     std::string(qualityrefinement::kBlendWeights) +
+                         qualityborder::kBorderWeights, why)) return false;
+    if (g_adaptive_quality_enabled) {
+      const char* insertion = use_border
+                                  ? qualityborder::kBorderWeights
+                                  : qualityrefinement::kBlendWeights;
+      if (!ReplaceOnce(program, insertion,
+                       std::string(insertion) +
+                           adaptivequality::kCandidateArbitration,
+                       why)) return false;
+    }
+  }
+  return ReplaceOnce(ptx, kInsertion, program + kInsertion, why);
 }
 
 inline const ProviderProfile* MatchProvider(const IMAGE_NT_HEADERS64* nt) {
@@ -676,6 +711,17 @@ inline bool Apply(HMODULE module, const Options& options,
       return;
     }
     mechanism_result->applied = true;
+    if ((g_refinement_enabled || g_adaptive_quality_enabled) &&
+        mechanism == Mechanism::ValidatedWarpBlend)
+      mechanism_result->detail += "; smooth confidence V1";
+    if ((g_adaptive_quality_enabled ||
+         (g_refinement_enabled && g_border_confidence_enabled)) &&
+        mechanism == Mechanism::ValidatedWarpBlend)
+      mechanism_result->detail += "; symmetric two-pixel border confidence trial";
+    if (g_adaptive_quality_enabled &&
+        mechanism == Mechanism::ValidatedWarpBlend)
+      mechanism_result->detail +=
+          "; confidence-weighted forward/inverse candidate arbitration";
     redirects.push_back(std::move(redirect));
   };
 

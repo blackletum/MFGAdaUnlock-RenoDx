@@ -8,6 +8,9 @@ if(NOT EXISTS "${RENODX_SOURCE_DIR}/external/Streamline/include/sl.h")
   message(FATAL_ERROR "Set RENODX_SOURCE_DIR to the existing RenoDX build tree")
 endif()
 enable_testing()
+add_executable(latency_analysis_tests latency_analysis_tests.cpp)
+target_compile_definitions(latency_analysis_tests PRIVATE NOMINMAX)
+add_test(NAME latency_analysis_tests COMMAND latency_analysis_tests)
 add_executable(runtime_hook_tests runtime_hook_tests.cpp)
 target_compile_definitions(runtime_hook_tests PRIVATE NOMINMAX)
 target_include_directories(runtime_hook_tests SYSTEM PRIVATE
@@ -17,6 +20,15 @@ target_include_directories(runtime_hook_tests SYSTEM PRIVATE
 target_link_libraries(runtime_hook_tests PRIVATE
   "${RENODX_SOURCE_DIR}/external/Detours/lib.X64/detours.lib")
 add_test(NAME runtime_hook_tests COMMAND runtime_hook_tests)
+add_executable(latency_reflex_tests latency_reflex_tests.cpp)
+target_compile_definitions(latency_reflex_tests PRIVATE NOMINMAX)
+target_include_directories(latency_reflex_tests SYSTEM PRIVATE
+  "${RENODX_SOURCE_DIR}/external/Streamline/include"
+  "${RENODX_SOURCE_DIR}/external/reshade"
+  "${RENODX_SOURCE_DIR}/external/Detours/include")
+target_link_libraries(latency_reflex_tests PRIVATE
+  "${RENODX_SOURCE_DIR}/external/Detours/lib.X64/detours.lib")
+add_test(NAME latency_reflex_tests COMMAND latency_reflex_tests)
 add_executable(mfgdiagnostics_tests diagnostics_tests.cpp)
 target_compile_definitions(mfgdiagnostics_tests PRIVATE NOMINMAX)
 target_compile_options(mfgdiagnostics_tests PRIVATE /bigobj)
@@ -38,6 +50,11 @@ target_compile_definitions(quality_guard_tests PRIVATE NOMINMAX)
 target_include_directories(quality_guard_tests SYSTEM PRIVATE
   "${RENODX_SOURCE_DIR}/external/Streamline/include")
 add_test(NAME quality_guard_tests COMMAND quality_guard_tests)
+add_executable(input_diagnostics_tests input_diagnostics_tests.cpp)
+target_compile_definitions(input_diagnostics_tests PRIVATE NOMINMAX)
+target_include_directories(input_diagnostics_tests SYSTEM PRIVATE
+  "${RENODX_SOURCE_DIR}/external/Streamline/include")
+add_test(NAME input_diagnostics_tests COMMAND input_diagnostics_tests)
 add_executable(pacing_policy_tests pacing_policy_tests.cpp)
 add_test(NAME pacing_policy_tests COMMAND pacing_policy_tests)
 add_executable(force_policy_tests force_policy_tests.cpp)
@@ -65,6 +82,8 @@ if(POWERSHELL_EXECUTABLE)
 endif()
 find_package(Python3 COMPONENTS Interpreter QUIET)
 if(Python3_Interpreter_FOUND)
+  add_test(NAME quality_refinement
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/quality_refinement_tests.py")
   add_test(NAME silhouette_guard
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/silhouette_guard_tests.py")
 endif()

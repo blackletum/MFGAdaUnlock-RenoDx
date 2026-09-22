@@ -43,6 +43,9 @@ namespace mfgunlock::blackwell::generated_thin_geometry {
 #endif
 
 namespace mfgunlock::blackwell {
+inline bool g_refinement_enabled = false; // immutable after startup
+inline bool g_geometry_confidence_v2_enabled = false; // research-only, startup-scoped
+inline bool g_adaptive_quality_enabled = false; // unified research suite, startup-scoped
 
 enum class KernelRole {
   Unknown,
@@ -57,11 +60,17 @@ enum class SilhouetteGuardMode : unsigned int {
   Aggressive = 2,
 };
 
-inline constexpr const char* SilhouetteGuardMechanism(
+inline const char* SilhouetteGuardMechanism(
     SilhouetteGuardMode mode) {
   switch (mode) {
     case SilhouetteGuardMode::Balanced:
-      return "geometry_motion_depth";
+      return g_adaptive_quality_enabled
+                 ? "adaptive_quality_geometry_v1"
+                 : g_refinement_enabled
+                 ? (g_geometry_confidence_v2_enabled
+                        ? "geometry_support_smooth_v2"
+                        : "geometry_motion_depth_refined")
+                 : "geometry_motion_depth";
     case SilhouetteGuardMode::Aggressive:
       return "geometry_motion_depth_aggressive";
     default:
@@ -103,6 +112,13 @@ struct Result {
   bool silhouette_guard_requested = false;
   bool silhouette_guard = false;
   bool silhouette_guard_fallback = false;
+  bool refined_geometry = false;
+  bool geometry_confidence_v2 = false;
+  bool adaptive_quality_requested = false;
+  bool adaptive_geometry = false;
+  bool adaptive_inpaint_decision = false;
+  bool adaptive_directional_scatter = false;
+  bool adaptive_fallback = false;
   SilhouetteGuardMode silhouette_guard_mode_requested =
       SilhouetteGuardMode::Off;
   SilhouetteGuardMode silhouette_guard_mode_selected =
@@ -363,7 +379,8 @@ inline bool Apply(HMODULE module, std::vector<Patch>& patches, std::vector<void*
                   Result& result, std::string& detail,
                   bool enable_intermediate_scatter = false,
                   SilhouetteGuardMode silhouette_guard_mode =
-                      SilhouetteGuardMode::Off) {
+                      SilhouetteGuardMode::Off,
+                  bool enable_adaptive_quality = false) {
   patches.clear();
   allocations.clear();
   result = {};
@@ -371,6 +388,7 @@ inline bool Apply(HMODULE module, std::vector<Patch>& patches, std::vector<void*
   result.silhouette_guard_requested =
       silhouette_guard_mode != SilhouetteGuardMode::Off;
   result.silhouette_guard_mode_requested = silhouette_guard_mode;
+  result.adaptive_quality_requested = enable_adaptive_quality;
   detail.clear();
 
   std::vector<internal::Candidate> candidates;
@@ -408,7 +426,51 @@ inline bool Apply(HMODULE module, std::vector<Patch>& patches, std::vector<void*
       const auto* experimental = internal::MatchScatterVariant(
           fingerprint, candidate.payload, candidate.slot_size,
           requested_mechanism);
+      const bool v2_requested = g_refinement_enabled &&
+          g_geometry_confidence_v2_enabled &&
+          silhouette_guard_mode == SilhouetteGuardMode::Balanced;
+      const bool adaptive_geometry_requested = enable_adaptive_quality &&
+          silhouette_guard_mode == SilhouetteGuardMode::Balanced;
+      const char* selected_mechanism = experimental != nullptr
+                                           ? requested_mechanism
+                                           : nullptr;
+      if (experimental == nullptr && adaptive_geometry_requested) {
+        experimental = internal::MatchScatterVariant(
+            fingerprint, candidate.payload, candidate.slot_size,
+            "geometry_support_smooth_v2");
+        if (experimental != nullptr) {
+          selected_mechanism = "geometry_support_smooth_v2";
+          result.silhouette_guard_fallback = true;
+          result.adaptive_fallback = true;
+        }
+      }
+      if (experimental == nullptr && v2_requested) {
+        experimental = internal::MatchScatterVariant(
+            fingerprint, candidate.payload, candidate.slot_size,
+            "geometry_motion_depth_refined");
+        if (experimental != nullptr) {
+          selected_mechanism = "geometry_motion_depth_refined";
+          result.silhouette_guard_fallback = true;
+        }
+      }
+      if (experimental == nullptr && g_refinement_enabled &&
+          silhouette_guard_mode == SilhouetteGuardMode::Balanced) {
+        experimental = internal::MatchScatterVariant(fingerprint, candidate.payload,
+            candidate.slot_size, "geometry_motion_depth");
+        result.silhouette_guard_fallback = experimental != nullptr;
+        if (experimental != nullptr) selected_mechanism = "geometry_motion_depth";
+      }
       if (experimental != nullptr) {
+        result.adaptive_geometry = selected_mechanism != nullptr &&
+            std::strcmp(selected_mechanism,
+                        "adaptive_quality_geometry_v1") == 0;
+        result.adaptive_directional_scatter = result.adaptive_geometry;
+        result.geometry_confidence_v2 = selected_mechanism != nullptr &&
+            (std::strcmp(selected_mechanism, "geometry_support_smooth_v2") == 0 ||
+             result.adaptive_geometry);
+        result.refined_geometry = result.geometry_confidence_v2 ||
+            (selected_mechanism != nullptr &&
+             std::strcmp(selected_mechanism, "geometry_motion_depth_refined") == 0);
         replacement_data = experimental->data;
         replacement_size = experimental->size;
         result.silhouette_guard = result.silhouette_guard_requested;
@@ -419,7 +481,7 @@ inline bool Apply(HMODULE module, std::vector<Patch>& patches, std::vector<void*
         // balanced guard. Prefer that guarded path over unconditional retention.
         experimental = internal::MatchScatterVariant(
             fingerprint, candidate.payload, candidate.slot_size,
-            SilhouetteGuardMechanism(SilhouetteGuardMode::Balanced));
+            "geometry_motion_depth");
         if (experimental != nullptr) {
           replacement_data = experimental->data;
           replacement_size = experimental->size;
@@ -444,6 +506,25 @@ inline bool Apply(HMODULE module, std::vector<Patch>& patches, std::vector<void*
           result.silhouette_guard_fallback = true;
           result.silhouette_guard_mode_selected = SilhouetteGuardMode::Off;
         }
+      }
+    }
+    if (enable_adaptive_quality &&
+        candidate.role == KernelRole::InpaintDecision) {
+      const auto fingerprint = internal::ElfFingerprint{
+          candidate.replacement->text, candidate.replacement->shared,
+          candidate.replacement->regs};
+      const auto* adaptive_inpaint = internal::MatchScatterVariant(
+          fingerprint, candidate.payload, candidate.slot_size,
+          "adaptive_inpaint_decision_v1");
+      if (adaptive_inpaint != nullptr) {
+        replacement_data = adaptive_inpaint->data;
+        replacement_size = adaptive_inpaint->size;
+        result.adaptive_inpaint_decision = true;
+      } else {
+        // Keep the already validated Blackwell decision kernel. Adaptive
+        // quality is intentionally partial rather than substituting a guessed
+        // payload when the exact inpaint profile is unavailable.
+        result.adaptive_fallback = true;
       }
     }
 #endif
@@ -481,6 +562,10 @@ inline bool Apply(HMODULE module, std::vector<Patch>& patches, std::vector<void*
     if (result.silhouette_guard) {
       if (result.silhouette_guard_fallback) stream << "fallback ";
       stream << SilhouetteGuardName(result.silhouette_guard_mode_selected);
+      if (result.adaptive_geometry)
+        stream << " (adaptive asymmetric confidence V1)";
+      else if (result.geometry_confidence_v2) stream << " (geometry confidence V2)";
+      else if (result.refined_geometry) stream << " (refined confidence V1)";
     } else if (result.silhouette_guard_fallback) {
       stream << "unsupported (0.9 retention fallback applied)";
     } else {
@@ -489,6 +574,19 @@ inline bool Apply(HMODULE module, std::vector<Patch>& patches, std::vector<void*
   } else if (enable_intermediate_scatter) {
     stream << "; intermediate scatter retention="
            << (result.intermediate_scatter ? "applied" : "unsupported (baseline retained)");
+  }
+  if (enable_adaptive_quality) {
+    stream << "; adaptive quality geometry="
+           << (result.adaptive_geometry ? "asymmetric" : "fallback")
+           << ", directional scatter="
+           << (result.adaptive_directional_scatter
+                   ? "native motion-adaptive path"
+                   : "baseline")
+           << ", inpaint decision="
+           << (result.adaptive_inpaint_decision
+                   ? "non-finite fail-closed"
+                   : "baseline");
+    if (result.adaptive_fallback) stream << " (one or more exact variants unavailable)";
   }
   detail = stream.str();
   return result.motion_vector;

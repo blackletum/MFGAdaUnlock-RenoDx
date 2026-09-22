@@ -17,14 +17,49 @@
 
 namespace fc = mfgunlock::framecount;
 std::vector<unsigned int> requests;
+std::vector<sl::DLSSGMode> modes;
 unsigned int accepted_count = 1;
 bool transient = false;
+unsigned int get_state_calls = 0;
+size_t last_state_version = 0;
 sl::Result Provider(const sl::ViewportHandle&, const sl::DLSSGOptions& options) {
   requests.push_back(options.numFramesToGenerate);
+  modes.push_back(options.mode);
   if (options.mode == sl::DLSSGMode::eOff) return sl::Result::eOk;
   if (transient && requests.size() == 1) return sl::Result::eErrorInvalidState;
   return options.numFramesToGenerate == accepted_count
       ? sl::Result::eOk : sl::Result::eErrorFeatureNotSupported;
+}
+
+sl::Result ReentrantGetState(const sl::ViewportHandle& viewport,
+                             sl::DLSSGState& state,
+                             const sl::DLSSGOptions* options) {
+  ++get_state_calls;
+  return fc::internal::HookedGetState(viewport, state, options);
+}
+
+sl::Result WorkingGetState(const sl::ViewportHandle&, sl::DLSSGState&,
+                           const sl::DLSSGOptions*) {
+  ++get_state_calls;
+  return sl::Result::eOk;
+}
+
+sl::Result NativeState(const sl::ViewportHandle&, sl::DLSSGState& state,
+                       const sl::DLSSGOptions*) {
+  ++get_state_calls;
+  last_state_version = state.structVersion;
+  state.numFramesToGenerateMax = 1;
+  state.numFramesActuallyPresented = 3;
+  state.bIsVsyncSupportAvailable = sl::Boolean::eFalse;
+  if (state.structVersion >= sl::kStructVersion4) {
+    state.bIsDynamicMFGSupported = sl::Boolean::eTrue;
+  }
+  return sl::Result::eOk;
+}
+
+sl::Result FeatureProvider(sl::Feature, const char*, void*& function) {
+  function = reinterpret_cast<void*>(&NativeState);
+  return sl::Result::eOk;
 }
 
 int main() {
@@ -75,6 +110,112 @@ int main() {
   CHECK(fc::internal::HookedSetOptions(viewport, options) == sl::Result::eOk);
   CHECK((requests == std::vector<unsigned int>{3}));
   CHECK(!fc::g_effective_request_seen.load());
+
+  // A foreign wrapper can route its saved "original" back to our GetState
+  // hook. This must fail closed instead of exhausting the game's stack, and a
+  // later valid call on the same thread must still work.
+  fc::internal::g_get_state_reentry_logged.store(true);
+  fc::internal::g_real_get_state.store(&ReentrantGetState);
+  sl::DLSSGState state{};
+  CHECK(fc::internal::HookedGetState(viewport, state, nullptr) ==
+        sl::Result::eErrorInvalidState);
+  CHECK(get_state_calls == 1);
+  CHECK(fc::internal::g_get_state_reentry_seen.load());
+  CHECK(!fc::internal::g_get_state_call_active);
+  fc::internal::g_real_get_state.store(&WorkingGetState);
+  fc::g_addon_enabled.store(false);
+  CHECK(fc::internal::HookedGetState(viewport, state, nullptr) == sl::Result::eOk);
+  CHECK(get_state_calls == 2);
+  CHECK(!fc::internal::g_get_state_call_active);
+  fc::g_addon_enabled.store(true);
+
+  // Outlaws keeps the game's ABI and max-count fields unmodified at startup,
+  // but still observes successful presentation telemetry. Other games retain
+  // the established advertised-ceiling behavior.
+  fc::internal::g_real_get_state.store(&NativeState);
+  fc::internal::g_get_state_reentry_seen.store(false);
+  fc::g_status_ok_logged.store(true);
+  fc::g_state_seen.store(true);
+  fc::g_seen_present_counts.store(1u << 3);
+  fc::g_capacity_advertised.store(true);
+  fc::g_actual_frames_presented.store(3);
+  fc::g_vsync_support_seen.store(true);
+  fc::g_vsync_supported.store(false);
+  fc::g_state_samples.store(0);
+  fc::g_advertised_max_generated.store(5);
+  fc::g_outlaws_get_state_compat.store(true);
+  fc::g_dynamic_d3d12.store(true);
+  fc::g_streamline_2_14_1_active.store(true);
+  fc::g_dynamic_mfg_enabled.store(false);
+  fc::g_native_request_seen.store(false);
+  state.structVersion = sl::kStructVersion2;
+  CHECK(fc::internal::HookedGetState(viewport, state, nullptr) == sl::Result::eOk);
+  CHECK(get_state_calls == 3);
+  CHECK(last_state_version == sl::kStructVersion2);
+  CHECK(state.numFramesToGenerateMax == 1);
+  CHECK(fc::g_state_samples.load() == 1);
+  CHECK(fc::g_actual_frames_presented.load() == 3);
+  CHECK(fc::g_runtime_max_generated.load() == 1);
+
+  fc::g_outlaws_get_state_compat.store(false);
+  fc::g_dynamic_d3d12.store(false);
+  CHECK(fc::internal::HookedGetState(viewport, state, nullptr) == sl::Result::eOk);
+  CHECK(state.numFramesToGenerateMax == 5);
+
+  // Outlaws keeps Dynamic blocked even when the saved cross-game preference is
+  // enabled. Its fixed/native request and caller-owned GetState ABI stay intact.
+  fc::g_outlaws_get_state_compat.store(true);
+  fc::g_dynamic_d3d12.store(true);
+  fc::g_dynamic_mfg_enabled.store(true);
+  fc::g_dynamic_game_compat_blocked.store(true);
+  fc::g_native_request_seen.store(true);
+  fc::g_native_requested.store(1);
+  fc::g_native_result.store(static_cast<unsigned int>(sl::Result::eOk));
+  fc::g_dynamic_support_seen.store(true);
+  fc::g_dynamic_supported.store(true);
+  fc::g_dlssg_310_9_1_seen.store(true);
+  fc::g_force_multiplier.store(0);
+  options.mode = sl::DLSSGMode::eOn;
+  options.numFramesToGenerate = 1;
+  accepted_count = 1;
+  requests.clear();
+  modes.clear();
+  CHECK(fc::internal::HookedSetOptions(viewport, options) == sl::Result::eOk);
+  CHECK((requests == std::vector<unsigned int>{1}));
+  CHECK((modes == std::vector<sl::DLSSGMode>{sl::DLSSGMode::eOn}));
+  CHECK(!fc::g_dynamic_applied.load());
+  state.structVersion = sl::kStructVersion2;
+  CHECK(fc::internal::HookedGetState(viewport, state, nullptr) == sl::Result::eOk);
+  CHECK(last_state_version == sl::kStructVersion2);
+  CHECK(!fc::internal::g_get_state_reentry_seen.load());
+
+  // Other games retain the established Dynamic v4 capability probe.
+  fc::g_dynamic_game_compat_blocked.store(false);
+  state.structVersion = sl::kStructVersion2;
+  CHECK(fc::internal::HookedGetState(viewport, state, nullptr) == sl::Result::eOk);
+  CHECK(last_state_version == sl::kStructVersion4);
+
+  // The release Outlaws path must leave the actual function pointer native;
+  // wrapping it can recurse through the game's Streamline chain and gray out
+  // the Frame Generation menu. Other games retain the established wrapper.
+  fc::internal::g_real_get_feature_function = &FeatureProvider;
+  fc::internal::g_get_state_wrapped_logged.store(true);
+  fc::internal::g_real_get_state.store(nullptr);
+  fc::g_outlaws_get_state_compat.store(true);
+  void* state_function = nullptr;
+  CHECK(fc::internal::HookedGetFeatureFunction(
+            sl::kFeatureDLSS_G, "slDLSSGGetState", state_function) ==
+        sl::Result::eOk);
+  CHECK(state_function == reinterpret_cast<void*>(&NativeState));
+  CHECK(fc::internal::g_real_get_state.load() == nullptr);
+
+  fc::g_outlaws_get_state_compat.store(false);
+  state_function = nullptr;
+  CHECK(fc::internal::HookedGetFeatureFunction(
+            sl::kFeatureDLSS_G, "slDLSSGGetState", state_function) ==
+        sl::Result::eOk);
+  CHECK(state_function == reinterpret_cast<void*>(&fc::internal::HookedGetState));
+  CHECK(fc::internal::g_real_get_state.load() == &NativeState);
 
   // Preflight failure must not poison storage used by future hook retries.
   void* first = nullptr;

@@ -55,6 +55,7 @@
 
 #include "./force_policy.hpp"
 #include "./hdr_compat.hpp"
+#include "./input_diagnostics.hpp"
 #include "./ngx_hook.hpp"
 #include "./pacing_policy.hpp"
 #include "./quality_guard.hpp"
@@ -89,6 +90,9 @@ inline std::atomic<unsigned int> g_max_actual_frames_presented{0};
 inline std::atomic<unsigned long long> g_state_samples{0};
 inline std::atomic<unsigned int> g_seen_present_counts{0};
 inline std::atomic_bool g_addon_enabled{true};
+// Outlaws' FG menu failed while an eager newer-ABI GetState query was active.
+// Test the native startup contract before attributing that failure to the probe.
+inline std::atomic_bool g_outlaws_get_state_compat{false};
 
 // Some games submit HUD-less/UI resources in a color space which does not
 // match their final HDR color buffer. The resulting invalid separation mask
@@ -137,11 +141,16 @@ inline std::atomic_bool g_quality_viewport_capacity_exhausted{false};
 inline std::atomic_bool g_dynamic_mfg_enabled{false};
 inline std::atomic<unsigned int> g_dynamic_target_fps{0};
 inline std::atomic_bool g_dynamic_d3d12{false};
+inline std::atomic<qualityguard::FormatApi> g_format_api{qualityguard::FormatApi::kUnknown};
 inline std::atomic_bool g_dynamic_support_seen{false};
 inline std::atomic_bool g_dynamic_supported{false};
 inline std::atomic_bool g_dynamic_applied{false};
 inline std::atomic_bool g_dynamic_fell_back{false};
 inline std::atomic_bool g_dynamic_runtime_declined{false};
+// Some integrations expose a compatible fixed-MFG path but break when the
+// newer Dynamic ABI is submitted. This runtime-only compatibility gate does
+// not overwrite the user's saved Dynamic preference for other games.
+inline std::atomic_bool g_dynamic_game_compat_blocked{false};
 inline std::atomic<unsigned int> g_dynamic_result{0};
 inline std::atomic<unsigned int> g_dynamic_set_failures{0};
 inline std::atomic_bool g_dynamic_change_pending{false};
@@ -160,6 +169,44 @@ inline std::atomic_bool g_reflex_limit_failure_logged{false};
 // makes Streamline ignore dynamicTargetFrameRate. Keep it as an explicit
 // advanced source-frame cap instead of silently changing the game's limiter.
 inline std::atomic_bool g_dynamic_reflex_source_cap{false};
+
+// Latency Guard is monitor-only by default, so existing users receive useful
+// diagnostics without any change to Reflex, pacing or multiplier selection.
+// Automatic mode remains an explicit opt-in and can only tighten a native cap.
+inline std::atomic<unsigned int> g_latency_guard_mode{
+    static_cast<unsigned int>(pacing::LatencyGuardMode::kMonitor)};
+inline std::atomic_bool g_latency_guard_sample_seen{false};
+inline std::atomic<uint64_t> g_latency_guard_epoch{1};
+inline std::atomic<unsigned int> g_latency_guard_units{0};
+inline std::atomic<unsigned int> g_latency_guard_new_frames{0};
+inline std::atomic<unsigned int> g_latency_guard_display_refresh_fps{0};
+inline std::atomic<unsigned int> g_latency_guard_live_multiplier{0};
+inline std::atomic<unsigned int> g_latency_guard_output_target_fps{0};
+inline std::atomic<unsigned int> g_latency_guard_recommended_source_cap_fps{0};
+inline std::atomic<unsigned int> g_latency_guard_active_source_cap_fps{0};
+inline std::atomic<unsigned int> g_latency_guard_estimated_source_fps{0};
+inline std::atomic<unsigned int> g_latency_guard_simulation_fps{0};
+inline std::atomic<unsigned int> g_latency_guard_projected_output_fps{0};
+inline std::atomic<unsigned int> g_latency_guard_suggested_multiplier{0};
+inline std::atomic_bool g_latency_guard_multiplier_high{false};
+inline std::atomic<unsigned int> g_latency_guard_marker_health{
+    static_cast<unsigned int>(pacing::MarkerHealth::kUnavailable)};
+inline std::atomic<unsigned int> g_latency_guard_queue_wait_us{0};
+inline std::atomic<unsigned int> g_latency_guard_gpu_frame_time_us{0};
+inline std::atomic<unsigned int> g_latency_guard_pipeline_latency_us{0};
+inline std::atomic<unsigned int> g_latency_guard_input_to_gpu_end_us{0};
+inline std::atomic<unsigned int> g_latency_guard_ai_frame_time_us{0};
+inline std::atomic<unsigned int> g_latency_guard_timing_samples{0};
+inline std::atomic_bool g_latency_guard_timing_confident{false};
+inline std::atomic_bool g_latency_guard_oversubscribed{false};
+inline std::atomic_bool g_latency_guard_auto_cap_ready{false};
+inline std::atomic<unsigned int> g_latency_guard_stable_samples{0};
+inline std::atomic<unsigned int> g_latency_guard_clear_samples{0};
+inline std::atomic<unsigned int> g_latency_guard_candidate_cap_fps{0};
+inline std::atomic_bool g_latency_guard_refresh_pending{false};
+inline std::atomic<unsigned long long> g_latency_guard_ui_heartbeat_ms{0};
+// 0 = native/no addon cap, 1 = legacy explicit source cap, 2 = Latency Guard.
+inline std::atomic<unsigned int> g_reflex_limit_source{0};
 
 // Dynamic MFG is release-supported only on the validated 310.9.1 / 2.14.1
 // stack. The provider capability bit remains authoritative, while these loaded
@@ -290,6 +337,15 @@ using ReflexSetOptionsFn = PFun_slReflexSetOptions*;
 
 inline std::atomic<SetOptionsFn> g_real_set_options{nullptr};
 inline std::atomic<GetStateFn> g_real_get_state{nullptr};
+inline thread_local bool g_get_state_call_active = false;
+inline std::atomic_bool g_get_state_reentry_seen{false};
+inline std::atomic_bool g_get_state_reentry_logged{false};
+struct GetStateCallGuard {
+  GetStateCallGuard() { g_get_state_call_active = true; }
+  ~GetStateCallGuard() { g_get_state_call_active = false; }
+  GetStateCallGuard(const GetStateCallGuard&) = delete;
+  GetStateCallGuard& operator=(const GetStateCallGuard&) = delete;
+};
 inline GetFeatureFunctionFn g_real_get_feature_function = nullptr;
 inline InitFn g_real_init = nullptr;
 inline SetTagFn g_real_set_tag = nullptr;
@@ -303,16 +359,42 @@ inline std::atomic_bool g_reflex_wrapped_logged{false};
 inline SRWLOCK g_reflex_options_lock = SRWLOCK_INIT;
 inline sl::ReflexOptions g_last_native_reflex_options{};
 inline bool g_last_native_reflex_options_valid = false;
+inline SRWLOCK g_reflex_submit_lock = SRWLOCK_INIT;
+inline std::atomic<DWORD> g_reflex_owner_thread{0};
+inline thread_local bool g_reflex_call_active = false;
+inline sl::ReflexOptions g_last_accepted_reflex_options{};
+inline bool g_last_accepted_reflex_valid = false;
+inline ReflexSetOptionsFn g_last_accepted_reflex_function = nullptr;
+inline uint64_t g_last_accepted_reflex_epoch = 0;
+inline bool SameReflexOptions(const sl::ReflexOptions& a, const sl::ReflexOptions& b) {
+  return a.next == nullptr && b.next == nullptr && a.mode == b.mode &&
+      a.frameLimitUs == b.frameLimitUs && a.useMarkersToOptimize == b.useMarkersToOptimize &&
+      a.virtualKey == b.virtualKey && a.idThread == b.idThread;
+}
+struct ReflexCallScope {
+  ReflexCallScope() { g_reflex_call_active = true; }
+  ~ReflexCallScope() { g_reflex_call_active = false; ReleaseSRWLockExclusive(&g_reflex_submit_lock); }
+};
 
-inline bool ShouldApplyReflexTarget() {
+inline bool ShouldApplyExplicitReflexTarget() {
   return pacing::ShouldApplyReflexSourceCap(
-      g_dynamic_mfg_enabled.load(std::memory_order_relaxed),
+      g_dynamic_mfg_enabled.load(std::memory_order_relaxed) &&
+          !g_dynamic_game_compat_blocked.load(std::memory_order_relaxed),
       g_dynamic_d3d12.load(std::memory_order_relaxed),
       g_dynamic_support_seen.load(std::memory_order_acquire),
       g_dynamic_supported.load(std::memory_order_relaxed),
       g_dynamic_applied.load(std::memory_order_relaxed),
       g_dynamic_reflex_source_cap.load(std::memory_order_relaxed),
       g_dynamic_target_fps.load(std::memory_order_relaxed));
+}
+
+inline bool ShouldApplyLatencyGuardTarget() {
+  return g_addon_enabled.load(std::memory_order_relaxed) &&
+         g_latency_guard_mode.load(std::memory_order_relaxed) ==
+             static_cast<unsigned int>(pacing::LatencyGuardMode::kAutomatic) &&
+         g_latency_guard_auto_cap_ready.load(std::memory_order_acquire) &&
+         g_latency_guard_active_source_cap_fps.load(
+             std::memory_order_relaxed) != 0;
 }
 
 inline bool DynamicVersionStackReady() {
@@ -353,31 +435,75 @@ inline void ObserveStreamlineFunctionOwner(const void* function) {
   if (is_streamline_owner) ObserveStreamlinePluginVersion(owner, true);
 }
 
-inline sl::Result SubmitReflexOptions(const sl::ReflexOptions& native_options) {
+inline sl::Result SubmitReflexOptions(const sl::ReflexOptions& native_options, bool refresh = false) {
   const auto real = g_real_reflex_set_options.load(std::memory_order_acquire);
   if (real == nullptr) return sl::Result::eErrorNotInitialized;
 
   sl::ReflexOptions forwarded = native_options;
-  const bool apply_target = ShouldApplyReflexTarget();
-  if (apply_target) {
+  const bool apply_explicit_target = ShouldApplyExplicitReflexTarget();
+  const bool apply_latency_guard =
+      !apply_explicit_target && ShouldApplyLatencyGuardTarget();
+  if (apply_explicit_target) {
     forwarded.frameLimitUs = pacing::TargetFpsToFrameLimitUs(
         g_dynamic_target_fps.load(std::memory_order_relaxed));
+  } else if (apply_latency_guard) {
+    const uint32_t guard_limit_us = pacing::TargetFpsToFrameLimitUs(
+        g_latency_guard_active_source_cap_fps.load(
+            std::memory_order_relaxed));
+    forwarded.frameLimitUs = pacing::PreserveStricterNativeLimit(
+        native_options.frameLimitUs, guard_limit_us);
   }
 
-  const sl::Result result = real(forwarded);
+  const bool guard_changes_limit =
+      apply_latency_guard && forwarded.frameLimitUs != native_options.frameLimitUs;
+  const auto epoch = g_latency_guard_epoch.load(std::memory_order_acquire);
+  if (refresh && g_last_accepted_reflex_valid && g_last_accepted_reflex_function == real &&
+      g_last_accepted_reflex_epoch == epoch &&
+      SameReflexOptions(forwarded, g_last_accepted_reflex_options)) return sl::Result::eOk;
+  sl::Result result = real(forwarded);
+  if (result != sl::Result::eOk && forwarded.frameLimitUs != native_options.frameLimitUs) {
+    // A rejected override is not proof that native state was preserved.
+    // Retry once at the same serialized call boundary, without an override.
+    result = real(native_options);
+    forwarded = native_options;
+    g_latency_guard_auto_cap_ready.store(false, std::memory_order_release);
+    g_latency_guard_active_source_cap_fps.store(0, std::memory_order_relaxed);
+    g_latency_guard_epoch.fetch_add(1, std::memory_order_acq_rel);
+    reshade::log::message(reshade::log::level::warning,
+        result == sl::Result::eOk ? "mfgunlock: Reflex override rejected; native options restored."
+                                : "mfgunlock: Reflex override and native retry failed; cap state unknown.");
+  }
+  const bool override_accepted = result == sl::Result::eOk &&
+      forwarded.frameLimitUs != native_options.frameLimitUs;
+  g_last_accepted_reflex_valid = result == sl::Result::eOk && forwarded.next == nullptr;
+  if (g_last_accepted_reflex_valid) {
+    g_last_accepted_reflex_options = forwarded;
+    g_last_accepted_reflex_function = real;
+    g_last_accepted_reflex_epoch = g_latency_guard_epoch.load(std::memory_order_acquire);
+  }
   g_reflex_native_limit_us.store(native_options.frameLimitUs,
                                  std::memory_order_relaxed);
-  g_reflex_effective_limit_us.store(forwarded.frameLimitUs,
-                                    std::memory_order_relaxed);
+  if (result == sl::Result::eOk)
+    g_reflex_effective_limit_us.store(forwarded.frameLimitUs, std::memory_order_relaxed);
   g_reflex_limit_result.store(static_cast<unsigned int>(result),
                               std::memory_order_relaxed);
+  const bool apply_target = override_accepted;
+  const unsigned int new_source =
+      result == sl::Result::eOk
+          ? (override_accepted ? (apply_explicit_target ? 1u : 2u) : 0u)
+          : 0u;
+  const unsigned int previous_source =
+      g_reflex_limit_source.exchange(new_source, std::memory_order_acq_rel);
   const bool was_applied = g_reflex_limit_applied.exchange(
       apply_target && result == sl::Result::eOk, std::memory_order_acq_rel);
 
-  if (apply_target && result == sl::Result::eOk && !was_applied) {
+  if (apply_target && result == sl::Result::eOk &&
+      (!was_applied || previous_source != new_source)) {
     g_reflex_limit_failure_logged.store(false, std::memory_order_relaxed);
     std::stringstream s;
-    s << "mfgunlock: advanced Reflex source-frame cap applied ("
+    s << "mfgunlock: "
+      << (guard_changes_limit ? "Latency Guard" : "advanced")
+      << " Reflex source-frame cap applied ("
       << native_options.frameLimitUs << " us -> " << forwarded.frameLimitUs
       << " us). This limits application-rendered frames; it is not a Dynamic "
          "MFG output-FPS target.";
@@ -388,7 +514,7 @@ inline sl::Result SubmitReflexOptions(const sl::ReflexOptions& native_options) {
     std::stringstream s;
     s << "mfgunlock: Reflex rejected the advanced source-frame cap with sl::Result "
       << static_cast<unsigned int>(result)
-      << "; Dynamic MFG remains active and the game's native Reflex settings are preserved.";
+      << "; native restoration could not be confirmed.";
     reshade::log::message(reshade::log::level::warning, s.str().c_str());
   } else if (!apply_target && was_applied && result == sl::Result::eOk) {
     reshade::log::message(
@@ -399,34 +525,56 @@ inline sl::Result SubmitReflexOptions(const sl::ReflexOptions& native_options) {
 }
 
 inline void RefreshReflexTarget() {
-  if (g_real_reflex_set_options.load(std::memory_order_acquire) == nullptr) return;
+  // Only the thread observed submitting native Reflex options may replay them.
+  // Do not block Present on provider work or retain caller-owned chains.
+  if (g_reflex_call_active || g_reflex_owner_thread.load(std::memory_order_acquire) != GetCurrentThreadId() ||
+      !TryAcquireSRWLockExclusive(&g_reflex_submit_lock)) {
+    g_latency_guard_refresh_pending.store(true, std::memory_order_release);
+    return;
+  }
+  ReflexCallScope scope;
   sl::ReflexOptions native_options{};
   AcquireSRWLockShared(&g_reflex_options_lock);
   const bool valid = g_last_native_reflex_options_valid;
   if (valid) native_options = g_last_native_reflex_options;
   ReleaseSRWLockShared(&g_reflex_options_lock);
-  if (valid) SubmitReflexOptions(native_options);
+  if (valid) SubmitReflexOptions(native_options, true);
 }
 
 inline sl::Result HookedReflexSetOptions(const sl::ReflexOptions& options) {
   const auto real = g_real_reflex_set_options.load(std::memory_order_acquire);
   if (real == nullptr) return sl::Result::eErrorNotInitialized;
-  if (options.structType != sl::ReflexOptions::s_structType ||
-      options.structVersion != sl::kStructVersion1) {
-    return real(options);
-  }
-
+  // A detour cycle must fail rather than recurse to stack exhaustion.
+  if (g_reflex_call_active) return sl::Result::eErrorInvalidState;
+  AcquireSRWLockExclusive(&g_reflex_submit_lock);
+  ReflexCallScope scope;
+  const bool replayable = options.structType == sl::ReflexOptions::s_structType &&
+      options.structVersion == sl::kStructVersion1 && options.next == nullptr;
   AcquireSRWLockExclusive(&g_reflex_options_lock);
-  g_last_native_reflex_options = options;
-  g_last_native_reflex_options_valid = true;
+  g_last_native_reflex_options_valid = replayable;
+  if (replayable) g_last_native_reflex_options = options;
   ReleaseSRWLockExclusive(&g_reflex_options_lock);
-  g_reflex_options_seen.store(true, std::memory_order_release);
+  g_reflex_owner_thread.store(GetCurrentThreadId(), std::memory_order_release);
+  g_reflex_options_seen.store(replayable, std::memory_order_release);
+  g_latency_guard_refresh_pending.store(false, std::memory_order_release);
+  if (!replayable) {
+    g_last_accepted_reflex_valid = false;
+    const auto result = real(options); // exact native call, no stored pointer
+    g_reflex_limit_result.store(static_cast<unsigned int>(result), std::memory_order_relaxed);
+    if (result == sl::Result::eOk) {
+      g_reflex_limit_applied.store(false, std::memory_order_release);
+      g_reflex_limit_source.store(0, std::memory_order_relaxed);
+    }
+    return result;
+  }
   return SubmitReflexOptions(options);
 }
 
 constexpr uint32_t kUnusedViewport = (std::numeric_limits<uint32_t>::max)();
 struct QualityViewportState {
   SRWLOCK lock = SRWLOCK_INIT;
+  bool tag_frame_seen = false;
+  uint32_t tag_frame = 0;
   std::atomic<uint32_t> key{kUnusedViewport};
   std::atomic_bool options_seen{false};
   std::atomic<uint32_t> mode{0};
@@ -487,6 +635,7 @@ inline void RequestAllResets() {
 inline void ForgetOutputDescriptions() {
   for (auto& state : g_quality_viewports) {
     AcquireSRWLockExclusive(&state.lock);
+    state.tag_frame_seen = false;
     state.backbuffer_width.store(0, std::memory_order_relaxed);
     state.backbuffer_height.store(0, std::memory_order_relaxed);
     state.backbuffer_format.store(0, std::memory_order_relaxed);
@@ -578,8 +727,13 @@ inline sl::Result CallSetOptions(const sl::ViewportHandle& viewport,
                                  bool override_generated_frames = false) {
   const auto real = g_real_set_options.load(std::memory_order_acquire);
   if (real == nullptr) return sl::Result::eErrorNotInitialized;
+  const auto call_real = [&](const sl::DLSSGOptions& downstream) {
+    inputdiag::ObserveOptions(static_cast<uint32_t>(viewport), downstream,
+                              true);
+    return real(viewport, downstream);
+  };
   if (!g_addon_enabled.load(std::memory_order_relaxed))
-    return real(viewport, options);
+    return call_real(options);
 
   const uint32_t effective_generated =
       override_generated_frames ? generated_frames : options.numFramesToGenerate;
@@ -603,6 +757,7 @@ inline sl::Result CallSetOptions(const sl::ViewportHandle& viewport,
   const bool recompose = game_enabled && (explicit_recomposition || guarded_recomposition);
   const bool dynamic =
       game_enabled && g_dynamic_mfg_enabled.load(std::memory_order_relaxed) &&
+      !g_dynamic_game_compat_blocked.load(std::memory_order_relaxed) &&
       g_dynamic_d3d12.load(std::memory_order_relaxed) &&
       DynamicVersionStackReady() &&
       g_dynamic_support_seen.load(std::memory_order_acquire) &&
@@ -611,7 +766,7 @@ inline sl::Result CallSetOptions(const sl::ViewportHandle& viewport,
 
   const auto call_original = [&](bool preserve_ui_rejection = false) {
     ObserveOptionsTransition(viewport, options, effective_generated);
-    const sl::Result result = real(viewport, options);
+    const sl::Result result = call_real(options);
     if (result == sl::Result::eOk && game_enabled) {
       if (!preserve_ui_rejection) {
         g_quality_mode_change_pending.store(false, std::memory_order_release);
@@ -682,7 +837,7 @@ inline sl::Result CallSetOptions(const sl::ViewportHandle& viewport,
 
   g_ui_recomposition_source_version.store(
       static_cast<unsigned int>(options.structVersion), std::memory_order_relaxed);
-  sl::Result result = real(viewport, forwarded);
+  sl::Result result = call_real(forwarded);
   if (result == sl::Result::eOk) {
     g_quality_mode_change_pending.store(false, std::memory_order_release);
     ObserveOptionsTransition(viewport, forwarded, forwarded.numFramesToGenerate);
@@ -742,7 +897,7 @@ inline sl::Result CallSetOptions(const sl::ViewportHandle& viewport,
   // itself the one bounded same-options retry.
   if (dynamic) {
     if (recompose) {
-      const sl::Result same_options_retry = real(viewport, forwarded);
+      const sl::Result same_options_retry = call_real(forwarded);
       if (same_options_retry == sl::Result::eOk) {
         ObserveOptionsTransition(viewport, forwarded,
                                  forwarded.numFramesToGenerate);
@@ -773,7 +928,7 @@ inline sl::Result CallSetOptions(const sl::ViewportHandle& viewport,
     sl::DLSSGOptions dynamic_only{};
     if (hdrcompat::BuildAdvancedOptions(options, dynamic_only, generated_frames,
                                         override_generated_frames, false, true, target)) {
-      const sl::Result retry = real(viewport, dynamic_only);
+      const sl::Result retry = call_real(dynamic_only);
       if (retry == sl::Result::eOk) {
         ObserveOptionsTransition(viewport, dynamic_only,
                                  dynamic_only.numFramesToGenerate);
@@ -856,7 +1011,7 @@ inline sl::Result CallSetOptions(const sl::ViewportHandle& viewport,
 template <typename Forward>
 inline sl::Result FilterHudSeparationTags(const sl::ViewportHandle& viewport,
                                           const sl::ResourceTag* tags, uint32_t count,
-                                          Forward&& forward) {
+                                          Forward&& forward, const sl::FrameToken* frame = nullptr) {
   const bool filter = g_addon_enabled.load(std::memory_order_relaxed) &&
                       UsesQualityGuard();
   if (!filter || tags == nullptr || count == 0)
@@ -879,14 +1034,25 @@ inline sl::Result FilterHudSeparationTags(const sl::ViewportHandle& viewport,
     ReleaseSRWLockShared(&state->lock);
   }
   const qualityguard::Assessment assessment = qualityguard::AssessTags(
-      tags, count, hdr_active, expected);
+      tags, count, hdr_active, expected, g_format_api.load(std::memory_order_relaxed));
   const bool hybrid =
       g_hdr_compatibility_mode.load(std::memory_order_relaxed) ==
       static_cast<unsigned int>(HdrCompatibilityMode::kAutomaticHybrid);
+  const uint32_t tag_frame_index = frame != nullptr ? uint32_t(*frame) : 0;
   bool recomposition_eligible = false;
   bool suppress_hud_separation = assessment.suppress_hud_separation;
   if (state != nullptr) {
     AcquireSRWLockExclusive(&state->lock);
+    // Do not certify a current frame using optional resources whose lifetime
+    // ended at the previous Present. Do not retain caller-owned descriptors.
+    // Split frame-aware batches conservatively use final color unless a full
+    // pair is actually submitted together; explicit/native modes are unchanged.
+    if (frame != nullptr && (!state->tag_frame_seen || state->tag_frame != tag_frame_index)) {
+      state->tag_frame_seen = true;
+      state->tag_frame = tag_frame_index;
+      state->hudless_color_seen.store(false, std::memory_order_relaxed);
+      state->ui_color_or_alpha_seen.store(false, std::memory_order_relaxed);
+    }
     bool output_changed = false;
     if (assessment.observed_backbuffer.HasDimensions()) {
       const uint32_t previous_width =
@@ -959,6 +1125,7 @@ inline sl::Result FilterHudSeparationTags(const sl::ViewportHandle& viewport,
         recomposition_eligible =
             qualityguard::CanAutomaticallyUseUiRecomposition(accumulated,
                                                                hdr_active);
+        if (frame != nullptr && !complete_current_pair) recomposition_eligible = false;
         // Streamline tags expose resource formats but no color-space metadata.
         // Hybrid mode keeps only a structurally valid split; any concrete
         // mismatch remains fail-closed to final color.
@@ -1020,6 +1187,9 @@ inline sl::Result HookedSetTag(const sl::ViewportHandle& viewport,
                                const sl::ResourceTag* tags, uint32_t count,
                                sl::CommandBuffer* command_buffer) {
   if (g_real_set_tag == nullptr) return sl::Result::eErrorNotInitialized;
+  inputdiag::ObserveTags(static_cast<uint32_t>(viewport), tags, count, false, 0,
+                         static_cast<uint32_t>(g_format_api.load(
+                             std::memory_order_relaxed)));
   return FilterHudSeparationTags(viewport, tags, count, [&](const sl::ResourceTag* forwarded) {
     return g_real_set_tag(viewport, forwarded, count, command_buffer);
   });
@@ -1030,15 +1200,21 @@ inline sl::Result HookedSetTagForFrame(const sl::FrameToken& frame,
                                        const sl::ResourceTag* tags, uint32_t count,
                                        sl::CommandBuffer* command_buffer) {
   if (g_real_set_tag_for_frame == nullptr) return sl::Result::eErrorNotInitialized;
+  inputdiag::ObserveTags(static_cast<uint32_t>(viewport), tags, count, true,
+                         static_cast<uint32_t>(frame),
+                         static_cast<uint32_t>(g_format_api.load(
+                             std::memory_order_relaxed)));
   return FilterHudSeparationTags(viewport, tags, count, [&](const sl::ResourceTag* forwarded) {
     return g_real_set_tag_for_frame(frame, viewport, forwarded, count, command_buffer);
-  });
+  }, &frame);
 }
 
 inline sl::Result HookedSetConstants(const sl::Constants& values,
                                      const sl::FrameToken& frame,
                                      const sl::ViewportHandle& viewport) {
   if (g_real_set_constants == nullptr) return sl::Result::eErrorNotInitialized;
+  inputdiag::ObserveConstants(static_cast<uint32_t>(viewport), values,
+                              static_cast<uint32_t>(frame));
   if (!g_addon_enabled.load(std::memory_order_relaxed))
     return g_real_set_constants(values, frame, viewport);
 
@@ -1155,6 +1331,7 @@ inline sl::Result HookedSetOptions(const sl::ViewportHandle& viewport,
   const auto real = g_real_set_options.load(std::memory_order_acquire);
   if (real == nullptr)
     return sl::Result::eErrorNotInitialized;
+  inputdiag::ObserveOptions(static_cast<uint32_t>(viewport), options, false);
   if (!g_addon_enabled.load(std::memory_order_relaxed))
     return real(viewport, options);
 
@@ -1167,6 +1344,7 @@ inline sl::Result HookedSetOptions(const sl::ViewportHandle& viewport,
   }
   const bool dynamic_ready =
       game_enabled && g_dynamic_mfg_enabled.load(std::memory_order_relaxed) &&
+      !g_dynamic_game_compat_blocked.load(std::memory_order_relaxed) &&
       g_dynamic_d3d12.load(std::memory_order_relaxed) &&
       DynamicVersionStackReady() &&
       g_dynamic_support_seen.load(std::memory_order_acquire) &&
@@ -1419,12 +1597,28 @@ inline sl::Result HookedSetOptions(const sl::ViewportHandle& viewport,
 
 inline sl::Result HookedGetState(const sl::ViewportHandle& viewport, sl::DLSSGState& state,
                                  const sl::DLSSGOptions* options) {
+  // A second addon or a reloaded Streamline wrapper can return a function
+  // pointer which eventually calls back into this wrapper. Never enter that
+  // cycle again: Windows otherwise terminates the game with stack overflow.
+  if (g_get_state_call_active) {
+    g_get_state_reentry_seen.store(true, std::memory_order_release);
+    if (!g_get_state_reentry_logged.exchange(true, std::memory_order_relaxed)) {
+      reshade::log::message(
+          reshade::log::level::warning,
+          "mfgunlock: recursive slDLSSGGetState hook call blocked; returning invalid state "
+          "instead of overflowing the stack. Check for another Streamline hook or provider conflict.");
+    }
+    return sl::Result::eErrorInvalidState;
+  }
+  GetStateCallGuard call_guard;
   const auto real = g_real_get_state.load(std::memory_order_acquire);
   if (real == nullptr) return sl::Result::eErrorNotInitialized;
   if (!g_addon_enabled.load(std::memory_order_relaxed))
     return real(viewport, state, options);
 
   const size_t caller_version = state.structVersion;
+  const bool outlaws_compat =
+      g_outlaws_get_state_compat.load(std::memory_order_relaxed);
   sl::DLSSGState extended_state{};
   sl::DLSSGState* observed_state = &state;
   sl::Result result = sl::Result::eErrorNotInitialized;
@@ -1434,6 +1628,12 @@ inline sl::Result HookedGetState(const sl::ViewportHandle& viewport, sl::DLSSGSt
       g_streamline_2_14_1_active.load(std::memory_order_acquire) &&
       caller_version >= sl::kStructVersion1 &&
       caller_version < sl::kStructVersion4 &&
+      !g_dynamic_game_compat_blocked.load(std::memory_order_relaxed) &&
+      (!outlaws_compat ||
+       (g_dynamic_mfg_enabled.load(std::memory_order_relaxed) &&
+        g_native_request_seen.load(std::memory_order_relaxed) &&
+        g_native_result.load(std::memory_order_relaxed) ==
+            static_cast<unsigned int>(sl::Result::eOk))) &&
       g_dynamic_state_probe_failures.load(std::memory_order_relaxed) <
           kMaxDynamicProbeFailures;
   if (probe_dynamic_state) {
@@ -1553,10 +1753,14 @@ inline sl::Result HookedGetState(const sl::ViewportHandle& viewport, sl::DLSSGSt
       }
     }
   }
+  // The provider's patched architecture gates already expose 3x/4x in
+  // Outlaws. Preserve its native capability fields, while retaining the
+  // telemetry collected above and the separate SetOptions override.
   if (result != sl::Result::eOk || caller_version < sl::kStructVersion2) return result;
 
   const unsigned int reported = observed_state->numFramesToGenerateMax;
   g_runtime_max_generated.store(reported, std::memory_order_relaxed);
+  if (outlaws_compat) return result;
 
   const unsigned int wanted = g_advertised_max_generated.load(std::memory_order_relaxed);
   if (wanted < 2 || reported >= wanted) return result;
@@ -1592,13 +1796,28 @@ inline sl::Result HookedGetFeatureFunction(sl::Feature feature, const char* func
              std::strcmp(function_name, "slDLSSGGetState") == 0 &&
              function != reinterpret_cast<void*>(&HookedGetState)) {
     ObserveStreamlineFunctionOwner(function);
-    g_real_get_state.store(reinterpret_cast<GetStateFn>(function),
-                           std::memory_order_release);
-    function = reinterpret_cast<void*>(&HookedGetState);
-    if (!g_get_state_wrapped_logged.exchange(true, std::memory_order_relaxed)) {
-      reshade::log::message(
-          reshade::log::level::info,
-          "mfgunlock: wrapped slDLSSGGetState; native multiplier-menu override is live.");
+    if (g_outlaws_get_state_compat.load(std::memory_order_relaxed)) {
+      // Outlaws' Streamline chain can route the saved function pointer back
+      // into this wrapper. Returning an error from the recursion guard prevents
+      // a stack overflow but also makes the game gray out Frame Generation.
+      // Its patched provider gates already expose the native multiplier menu,
+      // and Dynamic is blocked separately, so leave GetState untouched here.
+      if (!g_get_state_wrapped_logged.exchange(true,
+                                                std::memory_order_relaxed)) {
+        reshade::log::message(
+            reshade::log::level::info,
+            "mfgunlock: Star Wars Outlaws compatibility path: leaving slDLSSGGetState native so the game's Frame Generation menu remains available; SetOptions overrides and NVAPI UI telemetry remain active.");
+      }
+    } else {
+      g_real_get_state.store(reinterpret_cast<GetStateFn>(function),
+                             std::memory_order_release);
+      function = reinterpret_cast<void*>(&HookedGetState);
+      if (!g_get_state_wrapped_logged.exchange(true,
+                                                std::memory_order_relaxed)) {
+        reshade::log::message(
+            reshade::log::level::info,
+            "mfgunlock: wrapped slDLSSGGetState; native multiplier-menu override is live.");
+      }
     }
   } else if (feature == sl::kFeatureReflex &&
              std::strcmp(function_name, "slReflexSetOptions") == 0 &&
@@ -1638,6 +1857,16 @@ inline void NotifyHdrState(bool hdr) {
 }
 
 inline void NotifySwapchainTransition() {
+  g_latency_guard_epoch.fetch_add(1, std::memory_order_acq_rel);
+  if (g_latency_guard_auto_cap_ready.exchange(false,
+                                               std::memory_order_acq_rel)) {
+    g_latency_guard_refresh_pending.store(true, std::memory_order_release);
+  }
+  g_latency_guard_stable_samples.store(0, std::memory_order_relaxed);
+  g_latency_guard_clear_samples.store(0, std::memory_order_relaxed);
+  g_latency_guard_candidate_cap_fps.store(0, std::memory_order_relaxed);
+  g_latency_guard_active_source_cap_fps.store(0, std::memory_order_relaxed);
+  g_latency_guard_sample_seen.store(false, std::memory_order_release);
   internal::ForgetOutputDescriptions();
   if (internal::UsesQualityGuard()) {
     internal::RequestAllResets();
@@ -1662,8 +1891,18 @@ inline void NotifyDepthEdgeTuningChanged() {
   internal::RequestAllResets();
 }
 
-inline void NotifyDynamicD3D12(bool d3d12) {
+inline void NotifyDynamicD3D12(bool d3d12, bool vulkan = false,
+                               bool known_api = true) {
   g_dynamic_d3d12.store(d3d12, std::memory_order_relaxed);
+  g_format_api.store(!known_api ? qualityguard::FormatApi::kUnknown :
+      (vulkan ? qualityguard::FormatApi::kVulkan :
+                qualityguard::FormatApi::kDxgi), std::memory_order_relaxed);
+  inputdiag::g_native_api.store(
+      !known_api ? inputdiag::NativeApi::Unknown :
+      (vulkan ? inputdiag::NativeApi::Vulkan :
+       (d3d12 ? inputdiag::NativeApi::D3D12 :
+                inputdiag::NativeApi::D3D11)),
+      std::memory_order_relaxed);
 }
 
 inline void NotifyFixedMultiplierChanged(unsigned int) {

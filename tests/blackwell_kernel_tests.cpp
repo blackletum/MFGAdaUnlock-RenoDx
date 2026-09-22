@@ -38,6 +38,8 @@ int main() {
   bool found_intermediate_scatter = false;
   bool found_silhouette_guard = false;
   bool found_aggressive_silhouette_guard = false;
+  bool found_adaptive_geometry = false;
+  bool found_adaptive_inpaint = false;
   for (const auto& replacement : generated_thin_geometry::kThinGeometryCubins) {
     CHECK(replacement.data != nullptr);
     CHECK(replacement.size != 0);
@@ -47,15 +49,25 @@ int main() {
     CHECK(mechanism == "intermediate_scatter" ||
           mechanism == "geometry_motion" ||
           mechanism == "geometry_motion_depth" ||
-          mechanism == "geometry_motion_depth_aggressive");
+          mechanism == "geometry_motion_depth_refined" ||
+          mechanism == "geometry_support_smooth_v2" ||
+          mechanism == "geometry_motion_depth_aggressive" ||
+          mechanism == "adaptive_quality_geometry_v1" ||
+          mechanism == "adaptive_inpaint_decision_v1");
     found_intermediate_scatter |= mechanism == "intermediate_scatter";
     found_silhouette_guard |= mechanism == "geometry_motion_depth";
     found_aggressive_silhouette_guard |=
         mechanism == "geometry_motion_depth_aggressive";
+    found_adaptive_geometry |=
+        mechanism == "adaptive_quality_geometry_v1";
+    found_adaptive_inpaint |=
+        mechanism == "adaptive_inpaint_decision_v1";
   }
   CHECK(found_intermediate_scatter);
   CHECK(found_silhouette_guard);
   CHECK(found_aggressive_silhouette_guard);
+  CHECK(found_adaptive_geometry);
+  CHECK(found_adaptive_inpaint);
 #endif
 
   const mfgunlock::blackwell::Result defaults;
@@ -72,6 +84,20 @@ int main() {
   CHECK(std::string(mfgunlock::blackwell::SilhouetteGuardMechanism(
             mfgunlock::blackwell::SilhouetteGuardMode::Aggressive)) ==
         "geometry_motion_depth_aggressive");
+  g_refinement_enabled = true;
+  CHECK(std::string(SilhouetteGuardMechanism(SilhouetteGuardMode::Balanced)) ==
+        "geometry_motion_depth_refined");
+  g_geometry_confidence_v2_enabled = true;
+  CHECK(std::string(SilhouetteGuardMechanism(SilhouetteGuardMode::Balanced)) ==
+        "geometry_support_smooth_v2");
+  CHECK(std::string(SilhouetteGuardMechanism(SilhouetteGuardMode::Aggressive)) ==
+        "geometry_motion_depth_aggressive");
+  g_geometry_confidence_v2_enabled = false;
+  g_refinement_enabled = false;
+  g_adaptive_quality_enabled = true;
+  CHECK(std::string(SilhouetteGuardMechanism(SilhouetteGuardMode::Balanced)) ==
+        "adaptive_quality_geometry_v1");
+  g_adaptive_quality_enabled = false;
 
   std::cout << "blackwell kernel tests passed\n";
   return EXIT_SUCCESS;
