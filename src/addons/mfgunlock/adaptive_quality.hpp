@@ -18,6 +18,12 @@ inline constexpr const char* kCandidateArbitration = R"PTX(
 sub.f32 %qf2, %qf9, 0f3D4CCCCD;
 mul.sat.f32 %qf2, %qf2, 0f41200000;
 @!%qv3 mov.f32 %qf2, 0f00000000;
+// MFGUNLOCK_AGREEMENT_FAST_PATH_V1
+// With no disagreement evidence, arbitration is an identity operation. Skip
+// the dominance/smoothstep/reconstruction path and preserve the current
+// weights bit-for-bit in the common agreeing-candidate case.
+setp.le.f32 %qv2, %qf2, 0f00000000;
+@%qv2 bra MFGUNLOCK_CANDIDATE_ARBITRATION_DONE_V2;
 
 // A near tie must not choose a direction. Scale disagreement by the absolute
 // confidence gap, then use smoothstep so the winner changes continuously.
@@ -41,6 +47,7 @@ sub.f32 %qf2, %qf2, %qf3;
 fma.rn.f32 %qf2, %qf4, %qf2, %qf3;
 @%qv2 mov.f32 %qf1, %qf2;
 @!%qv2 mov.f32 %qf0, %qf2;
+MFGUNLOCK_CANDIDATE_ARBITRATION_DONE_V2:
 )PTX";
 
 // Scalar reference used by unit/property tests. `weaker` and `native` are

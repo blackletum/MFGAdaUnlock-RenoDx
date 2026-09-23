@@ -719,9 +719,12 @@ inline bool Apply(HMODULE module, const Options& options,
         mechanism == Mechanism::ValidatedWarpBlend)
       mechanism_result->detail += "; symmetric two-pixel border confidence trial";
     if (g_adaptive_quality_enabled &&
-        mechanism == Mechanism::ValidatedWarpBlend)
+        mechanism == Mechanism::ValidatedWarpBlend) {
       mechanism_result->detail +=
           "; confidence-weighted forward/inverse candidate arbitration";
+      mechanism_result->detail +=
+          "; saturated/interior/agreement workload fast paths V1";
+    }
     redirects.push_back(std::move(redirect));
   };
 

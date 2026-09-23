@@ -100,13 +100,19 @@ def main():
     fragment = header.split('R"PTX(', 1)[1].split(')PTX"', 1)[0]
     assert fragment in refined
     assert refined.count('MFGUNLOCK_SMOOTH_CONFIDENCE_V1') == 1
+    assert refined.count('MFGUNLOCK_FULL_CONFIDENCE_FAST_PATH_V1') == 1
+    assert refined.count('@%qv2 bra MFGUNLOCK_SMOOTH_CONFIDENCE_DONE_V1;') == 1
+    assert refined.count('MFGUNLOCK_SMOOTH_CONFIDENCE_DONE_V1:') == 1
     border = builder.patch_refined_border_blend(blend)
     border_header = (ROOT / 'src/addons/mfgunlock/quality_border.hpp').read_text()
     border_fragment = border_header.split('R"PTX(', 1)[1].split(')PTX"', 1)[0]
     assert border_fragment in border
     assert border.count('MFGUNLOCK_BORDER_CONFIDENCE_V1') == 1
-    assert border.count('sub.f32 %qf5, %qf0, %qf8;') == 1
-    assert border.count('sub.f32 %qf5, %qf1, %qf10;') == 1
+    assert border.count('MFGUNLOCK_BORDER_INTERIOR_FAST_PATH_V1') == 1
+    assert border.count('@%qv2 bra MFGUNLOCK_BORDER_CONFIDENCE_DONE_V1;') == 1
+    assert border.count('MFGUNLOCK_BORDER_CONFIDENCE_DONE_V1:') == 1
+    assert border.count('sub.f32 %qf6, %qf0, %qf8;') == 1
+    assert border.count('sub.f32 %qf6, %qf1, %qf10;') == 1
     # Only verified insertion anchors are accepted. No broad pattern scanning.
     geometry = '.reg .pred %p<656>;\n' + ''.join(
         spec['anchor'] for spec in builder._SILHOUETTE_NEIGHBORS.values())
@@ -132,6 +138,11 @@ def main():
     adaptive_fragment = adaptive_header.split('R"PTX(', 1)[1].split(')PTX"', 1)[0]
     assert adaptive_fragment in adaptive_blend
     assert adaptive_blend.count('MFGUNLOCK_CANDIDATE_ARBITRATION_V2') == 1
+    assert adaptive_blend.count('MFGUNLOCK_AGREEMENT_FAST_PATH_V1') == 1
+    assert adaptive_blend.count(
+        '@%qv2 bra MFGUNLOCK_CANDIDATE_ARBITRATION_DONE_V2;') == 1
+    assert adaptive_blend.count(
+        'MFGUNLOCK_CANDIDATE_ARBITRATION_DONE_V2:') == 1
     assert adaptive_blend.count('selp.f32 %qf2, %qf1, %qf0, %qv2;') == 1
     assert adaptive_blend.count('selp.f32 %qf3, %qf10, %qf8, %qv2;') == 1
     inpaint = ('setp.gt.ftz.f32 %p6, %f39, 0f00000000;\n'

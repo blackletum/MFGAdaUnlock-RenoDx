@@ -62,6 +62,16 @@ int main() {
         mechanism == "adaptive_quality_geometry_v1";
     found_adaptive_inpaint |=
         mechanism == "adaptive_inpaint_decision_v1";
+    if (mechanism == "adaptive_quality_geometry_v1" ||
+        mechanism == "adaptive_inpaint_decision_v1") {
+      internal::ElfFingerprint compiled{};
+      CHECK(internal::FingerprintElf(replacement.data, replacement.size,
+                                     compiled));
+      CHECK(compiled.shared == replacement.source_shared);
+      CHECK(compiled.text <= replacement.source_text);
+      CHECK(compiled.registers <=
+            (mechanism == "adaptive_quality_geometry_v1" ? 40u : 48u));
+    }
   }
   CHECK(found_intermediate_scatter);
   CHECK(found_silhouette_guard);

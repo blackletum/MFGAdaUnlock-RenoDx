@@ -29,6 +29,14 @@ sub.f32 %qf5, %qf10, 0f3E4CCCCD;
 mul.sat.f32 %qf5, %qf5, 0f40555555;
 min.f32 %qf5, %qf5, %qf3;
 max.f32 %qf5, %qf5, %qf2;
+// MFGUNLOCK_FULL_CONFIDENCE_FAST_PATH_V1
+// Saturated confidence leaves the already-boosted weights unchanged. This is
+// the common interior case, so avoid two smoothsteps and two reconstructive
+// FMAs. Mixed-confidence warps continue through the original arithmetic.
+setp.ge.f32 %qv5, %qf4, 0f3F800000;
+setp.ge.f32 %qv6, %qf5, 0f3F800000;
+and.pred %qv2, %qv5, %qv6;
+@%qv2 bra MFGUNLOCK_SMOOTH_CONFIDENCE_DONE_V1;
 // Smoothstep has zero slope at the acceptance boundary.
 fma.rn.f32 %qf7, %qf4, 0fC0000000, 0f40400000;
 mul.f32 %qf4, %qf4, %qf4;
@@ -40,5 +48,6 @@ sub.f32 %qf0, %qf0, %qf8;
 sub.f32 %qf1, %qf1, %qf10;
 fma.rn.f32 %qf0, %qf4, %qf0, %qf8;
 fma.rn.f32 %qf1, %qf5, %qf1, %qf10;
+MFGUNLOCK_SMOOTH_CONFIDENCE_DONE_V1:
 )PTX";
 }

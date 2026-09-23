@@ -46,8 +46,10 @@ int main() {
   CHECK(border.find(mfgunlock::qualityrefinement::kBlendWeights) != std::string::npos);
   CHECK(border.find(mfgunlock::qualityborder::kBorderWeights) != std::string::npos);
   CHECK(border.find("MFGUNLOCK_BORDER_CONFIDENCE_V1") != std::string::npos);
-  CHECK(border.find("sub.f32 %qf5, %qf0, %qf8;") != std::string::npos);
-  CHECK(border.find("sub.f32 %qf5, %qf1, %qf10;") != std::string::npos);
+  CHECK(border.find("MFGUNLOCK_BORDER_INTERIOR_FAST_PATH_V1") !=
+        std::string::npos);
+  CHECK(border.find("sub.f32 %qf6, %qf0, %qf8;") != std::string::npos);
+  CHECK(border.find("sub.f32 %qf6, %qf1, %qf10;") != std::string::npos);
   g_border_confidence_enabled = false;
   g_refinement_enabled = false;
   g_adaptive_quality_enabled = true;
@@ -57,6 +59,8 @@ int main() {
   CHECK(adaptive.find(mfgunlock::qualityborder::kBorderWeights) != std::string::npos);
   CHECK(adaptive.find(mfgunlock::adaptivequality::kCandidateArbitration) != std::string::npos);
   CHECK(adaptive.find("MFGUNLOCK_CANDIDATE_ARBITRATION_V2") != std::string::npos);
+  CHECK(adaptive.find("MFGUNLOCK_AGREEMENT_FAST_PATH_V1") !=
+        std::string::npos);
   CHECK(adaptive.find("selp.f32 %qf2, %qf1, %qf0, %qv2;") != std::string::npos);
   CHECK(adaptive.find("selp.f32 %qf3, %qf10, %qf8, %qv2;") != std::string::npos);
   g_adaptive_quality_enabled = false;
