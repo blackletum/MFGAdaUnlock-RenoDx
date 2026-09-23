@@ -259,9 +259,6 @@ inline std::atomic_bool g_vram_ui_estimate_ready{false};
 inline std::atomic_bool g_vram_estimate_ui_recomposition{false};
 inline std::atomic<unsigned int> g_vram_volatile_input_count{0};
 inline std::atomic<unsigned int> g_vram_estimate_flags{0};
-inline std::atomic_bool g_release_resources_when_off{false};
-inline std::atomic_bool g_release_resources_seen{false};
-inline std::atomic_bool g_release_resources_applied{false};
 
 inline void SetVramEstimateWaiting(
     memorypolicy::EstimateReadiness readiness,
@@ -960,27 +957,6 @@ inline sl::Result CallSetOptions(const sl::ViewportHandle& viewport,
   const auto real = g_real_set_options.load(std::memory_order_acquire);
   if (real == nullptr) return sl::Result::eErrorNotInitialized;
   const auto call_real = [&](const sl::DLSSGOptions& downstream) {
-    if (g_release_resources_when_off.load(std::memory_order_relaxed) &&
-        downstream.mode == sl::DLSSGMode::eOff &&
-        (static_cast<uint32_t>(downstream.flags) &
-         static_cast<uint32_t>(sl::DLSSGFlags::eRetainResourcesWhenOff)) != 0) {
-      sl::DLSSGOptions released{};
-      if (hdrcompat::BuildAdvancedOptions(
-              downstream, released, downstream.numFramesToGenerate, false,
-              false, false, 0.0f)) {
-        released.flags = static_cast<sl::DLSSGFlags>(
-            static_cast<uint32_t>(released.flags) &
-            ~static_cast<uint32_t>(
-                sl::DLSSGFlags::eRetainResourcesWhenOff));
-        inputdiag::ObserveOptions(static_cast<uint32_t>(viewport), released,
-                                  true);
-        const sl::Result result = real(viewport, released);
-        g_release_resources_seen.store(true, std::memory_order_release);
-        g_release_resources_applied.store(result == sl::Result::eOk,
-                                           std::memory_order_relaxed);
-        return result;
-      }
-    }
     inputdiag::ObserveOptions(static_cast<uint32_t>(viewport), downstream,
                               true);
     return real(viewport, downstream);

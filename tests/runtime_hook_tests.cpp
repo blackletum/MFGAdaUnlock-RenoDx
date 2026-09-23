@@ -18,7 +18,6 @@
 namespace fc = mfgunlock::framecount;
 std::vector<unsigned int> requests;
 std::vector<sl::DLSSGMode> modes;
-std::vector<uint32_t> option_flags;
 unsigned int accepted_count = 1;
 bool transient = false;
 unsigned int get_state_calls = 0;
@@ -27,7 +26,6 @@ bool vram_request_seen = false;
 sl::Result Provider(const sl::ViewportHandle&, const sl::DLSSGOptions& options) {
   requests.push_back(options.numFramesToGenerate);
   modes.push_back(options.mode);
-  option_flags.push_back(static_cast<uint32_t>(options.flags));
   if (options.mode == sl::DLSSGMode::eOff) return sl::Result::eOk;
   if (transient && requests.size() == 1) return sl::Result::eErrorInvalidState;
   return options.numFramesToGenerate == accepted_count
@@ -245,23 +243,6 @@ int main() {
   CHECK(fc::g_vram_estimate_status.load() == static_cast<unsigned int>(
       fc::VramEstimateStatus::kReady));
   CHECK(fc::g_vram_estimate_bytes.load() == (512ull << 20));
-
-  // Optional VRAM release changes only an FG-off retain request. The caller's
-  // options stay untouched and active Frame Generation options are unaffected.
-  fc::g_release_resources_when_off.store(true);
-  options.mode = sl::DLSSGMode::eOff;
-  options.flags = sl::DLSSGFlags::eRetainResourcesWhenOff;
-  option_flags.clear();
-  CHECK(fc::internal::HookedSetOptions(viewport, options) == sl::Result::eOk);
-  CHECK(option_flags.size() == 1);
-  CHECK((option_flags[0] & static_cast<uint32_t>(
-             sl::DLSSGFlags::eRetainResourcesWhenOff)) == 0);
-  CHECK((static_cast<uint32_t>(options.flags) & static_cast<uint32_t>(
-             sl::DLSSGFlags::eRetainResourcesWhenOff)) != 0);
-  CHECK(fc::g_release_resources_seen.load());
-  CHECK(fc::g_release_resources_applied.load());
-  fc::g_release_resources_when_off.store(false);
-  options.flags = {};
 
   // The release Outlaws path must leave the actual function pointer native;
   // wrapping it can recurse through the game's Streamline chain and gray out

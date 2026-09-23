@@ -4632,35 +4632,6 @@ void OnRegisterOverlay(reshade::api::effect_runtime* runtime) {
                 retained_while_off ? kUiWarning : kUiMuted);
       ImGui::EndTable();
     }
-    bool release_when_off =
-        mfgunlock::framecount::g_release_resources_when_off.load(
-            std::memory_order_relaxed);
-    if (ImGui::Checkbox("Release DLSS-G resources while FG is off (Experimental)",
-                        &release_when_off)) {
-      mfgunlock::framecount::g_release_resources_when_off.store(
-          release_when_off, std::memory_order_relaxed);
-      mfgunlock::framecount::g_release_resources_seen.store(
-          false, std::memory_order_relaxed);
-      mfgunlock::framecount::g_release_resources_applied.store(
-          false, std::memory_order_relaxed);
-      reshade::set_config_value(nullptr, kConfigSection,
-                                "ReleaseResourcesWhenOff",
-                                release_when_off ? 1 : 0);
-    }
-    HelpMarker(
-        "Only when Frame Generation is disabled, clears the game's request to retain DLSS-G resources. This may reduce idle VRAM but cannot reduce active Frame Generation memory. It can make the next enable slower or expose provider/game reinitialization bugs, so it is off by default.");
-    if (release_when_off) {
-      const bool observed =
-          mfgunlock::framecount::g_release_resources_seen.load(
-              std::memory_order_acquire);
-      ImGui::TextDisabled(
-          observed
-              ? (mfgunlock::framecount::g_release_resources_applied.load(
-                         std::memory_order_relaxed)
-                     ? "Last FG-off request accepted without resource retention."
-                     : "Provider rejected the last FG-off release request.")
-              : "Armed; toggle Frame Generation off to apply and measure idle VRAM.");
-    }
     ImGui::TextDisabled(
         "Read-only diagnostics. Process usage includes the whole game; the provider estimate is approximate.");
     HelpMarker(
@@ -5625,10 +5596,6 @@ void OnRegisterOverlay(reshade::api::effect_runtime* runtime) {
            << mfgunlock::framecount::g_vram_volatile_input_count.load(
                   std::memory_order_relaxed)
            << '\n'
-           << "Release resources while FG off: "
-           << (mfgunlock::framecount::g_release_resources_when_off.load(
-                   std::memory_order_relaxed) ? "Enabled" : "Disabled")
-           << '\n'
            << "Input quality mode: "
            << mfgunlock::framecount::g_hdr_compatibility_mode.load(
                   std::memory_order_relaxed)
@@ -5918,11 +5885,6 @@ void LoadConfig() {
     }
     mfgunlock::framecount::g_latency_guard_mode.store(
         static_cast<unsigned int>(value), std::memory_order_relaxed);
-  }
-  if (reshade::get_config_value(nullptr, kConfigSection,
-                                "ReleaseResourcesWhenOff", value)) {
-    mfgunlock::framecount::g_release_resources_when_off.store(
-        value != 0, std::memory_order_relaxed);
   }
   if (reshade::get_config_value(nullptr, kConfigSection, "HDRCompatibilityMode", value)) {
     if (value < static_cast<int>(mfgunlock::framecount::HdrCompatibilityMode::kNative) ||
