@@ -9,6 +9,17 @@
 
 namespace mfgunlock::latency {
 enum class Units : uint32_t { kUnknown, kMicroseconds, kQpc };
+enum TimingIssue : uint32_t {
+  kTimingOk = 0,
+  kTimingNotFresh = 1u << 0,
+  kTimingUnitsUnknown = 1u << 1,
+  kTimingInsufficientConsecutiveFrames = 1u << 2,
+  kTimingSimulationCadenceInvalid = 1u << 3,
+  kTimingPresentCadenceMissing = 1u << 4,
+  kTimingPresentCadenceMismatch = 1u << 5,
+  kTimingSimulationCadenceUnstable = 1u << 6,
+  kTimingPresentCadenceUnstable = 1u << 7,
+};
 struct History {
   uint64_t epoch = 0, frame = 0, gpu_end = 0, polled_ms = 0;
   bool seen = false;
@@ -24,9 +35,11 @@ template <class Frame> struct Report {
   uint32_t median_input_to_simulation_us = 0;
   uint32_t median_simulation_cpu_us = 0, median_submit_cpu_us = 0;
   uint32_t median_ai_frame_time_us = 0, new_frames = 0;
+  uint32_t source_timing_issue_mask = kTimingOk;
   Units timestamp_units = Units::kUnknown;
   uint64_t qpc_frequency = 0;
   bool fresh = false, source_timing_confident = false;
+  bool queue_timing_confident = false;
 };
 inline uint64_t ToUs(uint64_t value, Units units, uint64_t frequency) {
   if (units == Units::kMicroseconds) return value;
@@ -37,6 +50,18 @@ inline uint64_t ToUs(uint64_t value, Units units, uint64_t frequency) {
 inline bool Near(uint64_t a, uint64_t b, uint64_t percent = 2) {
   const auto delta = a > b ? a - b : b - a;
   return b != 0 && delta <= (std::max)(uint64_t{5}, b * percent / 100);
+}
+inline uint64_t AsQpcTicks(uint64_t microseconds, uint64_t frequency) {
+  if (frequency == 0) return 0;
+  const uint64_t whole = microseconds / 1000000ull;
+  if (whole > UINT64_MAX / frequency) return 0;
+  const uint64_t base = whole * frequency;
+  const uint64_t remainder = microseconds % 1000000ull;
+  const uint64_t tail = remainder * frequency / 1000000ull;
+  return base <= UINT64_MAX - tail ? base + tail : 0;
+}
+inline bool Within(uint64_t value, uint64_t reference, uint64_t tolerance) {
+  return (value > reference ? value - reference : reference - value) <= tolerance;
 }
 template <class Frame> bool Complete(const Frame& f) {
   return f.simulation_start_time && f.simulation_end_time >= f.simulation_start_time &&
@@ -56,7 +81,8 @@ template <size_t N> struct Samples {
 };
 template <class Frame, size_t N>
 Report<Frame> Analyze(const Frame (&frames)[N], uint64_t frequency,
-                      uint64_t now_ms, uint64_t epoch, History& history) {
+                      uint64_t now_ms, uint64_t epoch, History& history,
+                      uint64_t current_qpc = 0) {
   Report<Frame> out{};
   out.qpc_frequency = frequency;
   size_t pairs = 0, direct_matches = 0, qpc_matches = 0;
@@ -72,8 +98,29 @@ Report<Frame> Analyze(const Frame (&frames)[N], uint64_t frequency,
   }
   const bool direct = pairs >= 48 && direct_matches * 100 >= pairs * 95;
   const bool qpc = pairs >= 48 && qpc_matches * 100 >= pairs * 95;
-  if (direct && (!qpc || frequency == 1000000)) out.timestamp_units = Units::kMicroseconds;
-  else if (qpc && !direct) out.timestamp_units = Units::kQpc;
+  uint64_t latest_gpu_end = 0;
+  for (const auto& frame : frames) {
+    if (Complete(frame)) latest_gpu_end = frame.gpu_render_end_time;
+  }
+  // QueryPerformanceCounter is sampled immediately after the NVAPI call, so
+  // one second is intentionally generous while still separating raw QPC ticks
+  // from microseconds at common 10 MHz counter frequencies.
+  const uint64_t tolerance = frequency;
+  const bool raw_matches_qpc = current_qpc != 0 && latest_gpu_end != 0 &&
+      Within(latest_gpu_end, current_qpc, tolerance);
+  const uint64_t microseconds_as_qpc =
+      AsQpcTicks(latest_gpu_end, frequency);
+  const bool microseconds_match_qpc = current_qpc != 0 &&
+      microseconds_as_qpc != 0 &&
+      Within(microseconds_as_qpc, current_qpc, tolerance);
+  if (raw_matches_qpc != microseconds_match_qpc) {
+    out.timestamp_units = raw_matches_qpc ? Units::kQpc
+                                          : Units::kMicroseconds;
+  } else if (direct && (!qpc || frequency == 1000000)) {
+    out.timestamp_units = Units::kMicroseconds;
+  } else if (qpc && !direct) {
+    out.timestamp_units = Units::kQpc;
+  }
 
   Samples<N> simulation, present, gpu, gpu_active, queue, pipeline, input,
       input_to_simulation, simulation_cpu, submit_cpu, ai;
@@ -134,15 +181,34 @@ Report<Frame> Analyze(const Frame (&frames)[N], uint64_t frequency,
     out.fresh = out.new_frames >= 8;
   }
   history = {epoch, out.latest.frame_id, out.latest.gpu_render_end_time, now_ms, true};
-  // GPU completion cadence alone is not a source-FPS estimate. Require two
-  // application marker cadences to corroborate it before publishing a cap input.
-  out.source_timing_confident = out.fresh && out.timestamp_units != Units::kUnknown &&
-      run >= 48 && gpu.count >= 48 && gpu.count == out.valid_latency_frames &&
-      queue.count == out.valid_latency_frames &&
-      out.simulation_interval_us >= 1000 && out.simulation_interval_us <= 100000 &&
-      Near(present.P(50), out.simulation_interval_us, 20) &&
-      Near(gpu.P(50), out.simulation_interval_us, 20) &&
-      gpu.P(90) <= uint64_t(gpu.P(50)) * 3 / 2;
+  // Source cadence is an application-marker measurement. Corroborate the
+  // simulation cadence with Present markers, but do not require NVIDIA's
+  // gpu_frame_time_us to mean the same thing: its scope differs across driver
+  // and DLSS-G integrations (base GPU work, generated workload or a larger
+  // interval). Queue completeness is tracked separately so read-only source
+  // FPS can remain useful while automatic actions still fail closed.
+  if (!out.fresh) out.source_timing_issue_mask |= kTimingNotFresh;
+  if (out.timestamp_units == Units::kUnknown)
+    out.source_timing_issue_mask |= kTimingUnitsUnknown;
+  if (run < 48)
+    out.source_timing_issue_mask |= kTimingInsufficientConsecutiveFrames;
+  if (out.simulation_interval_us < 1000 ||
+      out.simulation_interval_us > 100000)
+    out.source_timing_issue_mask |= kTimingSimulationCadenceInvalid;
+  if (present.count < 48)
+    out.source_timing_issue_mask |= kTimingPresentCadenceMissing;
+  if (present.count >= 48 &&
+      !Near(present.P(50), out.simulation_interval_us, 20))
+    out.source_timing_issue_mask |= kTimingPresentCadenceMismatch;
+  if (simulation.count >= 48 &&
+      simulation.P(90) > uint64_t(simulation.P(50)) * 3 / 2)
+    out.source_timing_issue_mask |= kTimingSimulationCadenceUnstable;
+  if (present.count >= 48 &&
+      present.P(90) > uint64_t(present.P(50)) * 3 / 2)
+    out.source_timing_issue_mask |= kTimingPresentCadenceUnstable;
+  out.source_timing_confident = out.source_timing_issue_mask == kTimingOk;
+  out.queue_timing_confident = out.source_timing_confident &&
+      queue.count >= 48;
   if (out.source_timing_confident) out.source_interval_us = out.simulation_interval_us;
   return out;
 }

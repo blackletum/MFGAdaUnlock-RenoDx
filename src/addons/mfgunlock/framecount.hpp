@@ -56,6 +56,7 @@
 #include "./force_policy.hpp"
 #include "./hdr_compat.hpp"
 #include "./input_diagnostics.hpp"
+#include "./latency_analysis.hpp"
 #include "./memory_policy.hpp"
 #include "./ngx_hook.hpp"
 #include "./pacing_policy.hpp"
@@ -213,6 +214,9 @@ inline std::atomic<unsigned int> g_latency_guard_multiplier_override{0};
 inline std::atomic_bool g_latency_guard_multiplier_trial_accepted{false};
 inline std::atomic<unsigned int> g_latency_guard_timing_samples{0};
 inline std::atomic_bool g_latency_guard_timing_confident{false};
+inline std::atomic_bool g_latency_guard_queue_timing_confident{false};
+inline std::atomic<unsigned int> g_latency_guard_timing_issue_mask{
+    latency::kTimingNotFresh};
 inline std::atomic_bool g_latency_guard_oversubscribed{false};
 inline std::atomic_bool g_latency_guard_auto_cap_ready{false};
 inline std::atomic<unsigned int> g_latency_guard_stable_samples{0};
@@ -2131,6 +2135,11 @@ inline void NotifySwapchainTransition() {
   g_latency_guard_multiplier_trial_accepted.store(false,
                                                    std::memory_order_relaxed);
   g_latency_guard_sample_seen.store(false, std::memory_order_release);
+  g_latency_guard_timing_confident.store(false, std::memory_order_relaxed);
+  g_latency_guard_queue_timing_confident.store(false,
+                                                std::memory_order_relaxed);
+  g_latency_guard_timing_issue_mask.store(
+      latency::kTimingNotFresh, std::memory_order_relaxed);
   ResetVramEstimate();
   internal::ForgetOutputDescriptions();
   if (internal::UsesQualityGuard()) {

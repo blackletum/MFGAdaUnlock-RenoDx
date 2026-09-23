@@ -2133,6 +2133,9 @@ void UpdateLatencyGuard(reshade::api::swapchain* swapchain) {
       observation.median_pipeline_latency_us;
   const uint32_t observed_source_interval_us =
       observation.source_interval_us;
+  const bool action_timing_confident =
+      observation.source_timing_confident &&
+      observation.queue_timing_confident;
 
   const auto recommendation =
       mfgunlock::pacing::BuildLatencyGuardRecommendation(
@@ -2141,7 +2144,7 @@ void UpdateLatencyGuard(reshade::api::swapchain* swapchain) {
               ? mfgunlock::framecount::g_dynamic_target_fps.load(std::memory_order_relaxed) : 0,
           sleep_available ? observation.sleep.dynamic_frame_time_target_us : 0,
           live_multiplier, observed_source_interval_us, queue_wait_us,
-          gpu_frame_time_us, observation.source_timing_confident);
+          action_timing_confident);
 
   mfgunlock::framecount::g_latency_guard_units.store(
       static_cast<unsigned int>(observation.timestamp_units), std::memory_order_relaxed);
@@ -2204,7 +2207,9 @@ void UpdateLatencyGuard(reshade::api::swapchain* swapchain) {
       static_cast<unsigned int>(mfgunlock::pacing::ClassifyLatencyBottleneck(
           observation.source_timing_confident,
           recommendation.source_oversubscribed,
-          observation.p95_queue_wait_us, observed_source_interval_us,
+          observation.queue_timing_confident
+              ? observation.p95_queue_wait_us : 0,
+          observed_source_interval_us,
           observation.median_gpu_active_us,
           observation.median_ai_frame_time_us)),
       std::memory_order_relaxed);
@@ -2212,6 +2217,10 @@ void UpdateLatencyGuard(reshade::api::swapchain* swapchain) {
       observation.consecutive_timing_samples, std::memory_order_relaxed);
   mfgunlock::framecount::g_latency_guard_timing_confident.store(
       observation.source_timing_confident, std::memory_order_relaxed);
+  mfgunlock::framecount::g_latency_guard_queue_timing_confident.store(
+      observation.queue_timing_confident, std::memory_order_relaxed);
+  mfgunlock::framecount::g_latency_guard_timing_issue_mask.store(
+      observation.source_timing_issue_mask, std::memory_order_relaxed);
   mfgunlock::framecount::g_latency_guard_oversubscribed.store(
       recommendation.source_oversubscribed, std::memory_order_relaxed);
   mfgunlock::framecount::g_latency_guard_sample_seen.store(
@@ -2229,7 +2238,7 @@ void UpdateLatencyGuard(reshade::api::swapchain* swapchain) {
   static mfgunlock::latency::MultiplierTrial multiplier_trial;
   const bool safe = guard_mode == LatencyGuardMode::kAutomatic &&
       marker_health == mfgunlock::pacing::MarkerHealth::kHealthy &&
-      observation.source_timing_confident && sleep_available &&
+      action_timing_confident && sleep_available &&
       observation.sleep.game_sleep && !observation.sleep.dynamic_frame_generation_control &&
       (observation.sleep.sleep_interval_us == 0 ||
        mfgunlock::framecount::g_reflex_limit_source.load(std::memory_order_relaxed) == 2) &&
@@ -3289,10 +3298,32 @@ const char* MarkerHealthText(mfgunlock::pacing::MarkerHealth health) {
     case MarkerHealth::kInvalidOrder:
       return "Invalid marker order";
     case MarkerHealth::kUnstableTiming:
-      return "Timing unverified, stale or warming up";
+      return "Source timing validation failed";
     default:
       return "Unavailable";
   }
+}
+
+const char* TimingValidationText(uint32_t issues) {
+  using namespace mfgunlock::latency;
+  if (issues == kTimingOk) return "Verified from simulation + Present markers";
+  if ((issues & kTimingUnitsUnknown) != 0)
+    return "Timestamp scale could not be validated";
+  if ((issues & kTimingSimulationCadenceInvalid) != 0)
+    return "Simulation cadence is missing or outside the valid range";
+  if ((issues & kTimingPresentCadenceMissing) != 0)
+    return "Not enough consecutive Present markers";
+  if ((issues & kTimingPresentCadenceMismatch) != 0)
+    return "Present cadence does not match simulation cadence";
+  if ((issues & kTimingSimulationCadenceUnstable) != 0)
+    return "Simulation cadence is too unstable for automatic control";
+  if ((issues & kTimingPresentCadenceUnstable) != 0)
+    return "Present cadence is too unstable for automatic control";
+  if ((issues & kTimingInsufficientConsecutiveFrames) != 0)
+    return "Waiting for 49 consecutive Reflex frames";
+  if ((issues & kTimingNotFresh) != 0)
+    return "No sufficiently fresh completed-frame window";
+  return "Unclassified timing validation failure";
 }
 
 const char* LatencyBottleneckText(
@@ -4817,6 +4848,27 @@ void OnRegisterOverlay(reshade::api::effect_runtime* runtime) {
                                mfgunlock::pacing::MarkerHealth::kUnavailable
                        ? kUiMuted
                        : kUiWarning));
+      const uint32_t timing_issues =
+          mfgunlock::framecount::g_latency_guard_timing_issue_mask.load(
+              std::memory_order_relaxed);
+      const bool source_timing_confident =
+          mfgunlock::framecount::g_latency_guard_timing_confident.load(
+              std::memory_order_relaxed);
+      const bool queue_timing_confident =
+          mfgunlock::framecount::g_latency_guard_queue_timing_confident.load(
+              std::memory_order_relaxed);
+      StatusRow("Source timing validation",
+                TimingValidationText(timing_issues),
+                source_timing_confident ? kUiPositive : kUiWarning);
+      StatusRow("Queue timing validation",
+                !source_timing_confident
+                    ? "Waiting for valid source timing"
+                    : (queue_timing_confident
+                           ? "Verified from at least 48 queue markers"
+                           : "Not enough complete queue markers; automatic blocked"),
+                queue_timing_confident
+                    ? kUiPositive
+                    : (source_timing_confident ? kUiWarning : kUiMuted));
       const unsigned int refresh =
           mfgunlock::framecount::g_latency_guard_display_refresh_fps.load(
               std::memory_order_relaxed);
@@ -4843,9 +4895,6 @@ void OnRegisterOverlay(reshade::api::effect_runtime* runtime) {
               std::memory_order_relaxed);
       const unsigned int input_to_gpu =
           mfgunlock::framecount::g_latency_guard_input_to_gpu_end_us.load(
-              std::memory_order_relaxed);
-      const unsigned int gpu_frame_time =
-          mfgunlock::framecount::g_latency_guard_gpu_frame_time_us.load(
               std::memory_order_relaxed);
       const unsigned int gpu_active =
           mfgunlock::framecount::g_latency_guard_gpu_active_us.load(
@@ -4922,9 +4971,14 @@ void OnRegisterOverlay(reshade::api::effect_runtime* runtime) {
                     std::memory_order_relaxed)
                     ? kUiWarning
                     : kUiMuted);
+      const uint32_t observed_source_interval = source_fps == 0
+          ? 0
+          : mfgunlock::pacing::TargetFpsToFrameLimitUs(source_fps);
       const bool meaningful_queue =
-          queue_wait >= 1500 && gpu_frame_time != 0 &&
-          static_cast<uint64_t>(queue_wait) * 4ull >= gpu_frame_time;
+          queue_timing_confident && queue_wait >= 1500 &&
+          observed_source_interval != 0 &&
+          static_cast<uint64_t>(queue_wait) * 4ull >=
+              observed_source_interval;
       StatusRow("Median render-queue wait", queue_text.c_str(),
                 meaningful_queue ? kUiWarning : kUiMuted);
       StatusRow("Marker-to-GPU pipeline", pipeline_text.c_str(), kUiMuted);
@@ -5523,6 +5577,14 @@ void OnRegisterOverlay(reshade::api::effect_runtime* runtime) {
            << MarkerHealthText(static_cast<mfgunlock::pacing::MarkerHealth>(
                   mfgunlock::framecount::g_latency_guard_marker_health.load(
                       std::memory_order_relaxed)))
+           << '\n'
+           << "Source timing validation: "
+           << TimingValidationText(
+                  mfgunlock::framecount::g_latency_guard_timing_issue_mask.load(
+                      std::memory_order_relaxed))
+           << "; queue timing "
+           << (mfgunlock::framecount::g_latency_guard_queue_timing_confident.load(
+                   std::memory_order_relaxed) ? "verified" : "unverified")
            << '\n'
            << "Estimated real/source FPS: "
            << mfgunlock::framecount::g_latency_guard_estimated_source_fps.load(

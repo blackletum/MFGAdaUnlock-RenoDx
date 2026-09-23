@@ -94,15 +94,15 @@ inline constexpr uint32_t ResolveOutputTargetFps(
 // point remains responsible for the actual just-in-time scheduling.
 inline constexpr uint32_t RecommendQueueTrimSourceCapFps(
     uint32_t observed_source_interval_us, uint32_t queue_wait_us,
-    uint32_t gpu_frame_time_us, bool source_timing_confident,
-    uint32_t trim_percent = 3) {
+    bool source_timing_confident, uint32_t trim_percent = 3) {
   if (!source_timing_confident || observed_source_interval_us == 0 ||
-      queue_wait_us < 1500 || gpu_frame_time_us == 0 || trim_percent == 0 ||
+      queue_wait_us < 1500 || trim_percent == 0 ||
       trim_percent >= 10)
     return 0;
   // Require queueing to account for at least 25% of a real-frame interval.
   // Tiny queues are normal and do not justify reducing real-frame throughput.
-  if (static_cast<uint64_t>(queue_wait_us) * 4ull < gpu_frame_time_us) return 0;
+  if (static_cast<uint64_t>(queue_wait_us) * 4ull <
+      observed_source_interval_us) return 0;
   const uint32_t source_fps = FrameLimitUsToFps(observed_source_interval_us);
   if (source_fps < 30 || source_fps > 1000) return 0;
   const uint32_t cap = static_cast<uint32_t>(
@@ -117,7 +117,7 @@ inline constexpr LatencyGuardRecommendation BuildLatencyGuardRecommendation(
     uint32_t configured_dynamic_target_fps,
     uint32_t driver_dynamic_target_us, uint32_t total_multiplier,
     uint32_t observed_source_interval_us, uint32_t queue_wait_us,
-    uint32_t gpu_frame_time_us, bool source_timing_confident) {
+    bool source_timing_confident) {
   LatencyGuardRecommendation result{};
   result.output_target_fps = ResolveOutputTargetFps(
       vsync_active, display_refresh_fps, configured_dynamic_target_fps,
@@ -140,11 +140,10 @@ inline constexpr LatencyGuardRecommendation BuildLatencyGuardRecommendation(
   }
   result.sustained_queue_pressure =
       source_timing_confident && queue_wait_us >= 1500 &&
-      gpu_frame_time_us != 0 &&
-      static_cast<uint64_t>(queue_wait_us) * 4ull >= gpu_frame_time_us;
+      static_cast<uint64_t>(queue_wait_us) * 4ull >=
+          observed_source_interval_us;
   result.source_cap_fps = RecommendQueueTrimSourceCapFps(
-      observed_source_interval_us, queue_wait_us, gpu_frame_time_us,
-      source_timing_confident);
+      observed_source_interval_us, queue_wait_us, source_timing_confident);
   result.data_complete = source_timing_confident && source_fps != 0 &&
                          total_multiplier >= 2;
   result.source_oversubscribed =

@@ -35,8 +35,10 @@ int main() {
   Fill(r,0);
   auto a = latency::Analyze(r.frames,10000000,1000,1,h);
   CHECK(a.timestamp_units == latency::Units::kMicroseconds && !a.source_timing_confident);
+  CHECK((a.source_timing_issue_mask & latency::kTimingNotFresh) != 0);
   Fill(r,50); a=latency::Analyze(r.frames,10000000,1500,1,h);
   CHECK(a.source_timing_confident && a.source_interval_us==10000 && a.median_queue_wait_us==0);
+  CHECK(a.queue_timing_confident && a.source_timing_issue_mask == latency::kTimingOk);
   CHECK(a.median_pipeline_latency_us==8000 && a.new_frames==50);
   CHECK(a.p95_pipeline_latency_us==8000 && a.p95_gpu_frame_time_us==10000);
   CHECK(a.median_simulation_cpu_us==1000 && a.median_submit_cpu_us==500);
@@ -47,16 +49,25 @@ int main() {
   CHECK(a.median_pipeline_latency_us==8000);
   Fill(r,200,7); a=latency::Analyze(r.frames,10000000,2000,2,h);
   CHECK(a.timestamp_units==latency::Units::kUnknown && !a.source_timing_confident);
+  h = {};
+  Fill(r,200); for(auto& f:r.frames) f.gpu_frame_time_us=2500;
+  uint64_t current_qpc =
+      latency::AsQpcTicks(r.frames[63].gpu_render_end_time, 10000000);
+  a=latency::Analyze(r.frames,10000000,2000,4,h,current_qpc);
   Fill(r,250); for(auto& f:r.frames) f.gpu_frame_time_us=2500;
-  a=latency::Analyze(r.frames,10000000,2500,2,h); CHECK(!a.source_timing_confident);
+  current_qpc = latency::AsQpcTicks(
+      r.frames[63].gpu_render_end_time, 10000000);
+  a=latency::Analyze(r.frames,10000000,2500,4,h,current_qpc);
+  CHECK(a.source_timing_confident && a.queue_timing_confident);
   Fill(r,300); r.frames[40].frame_id=1;
-  a=latency::Analyze(r.frames,10000000,3000,2,h); CHECK(!a.source_timing_confident);
+  a=latency::Analyze(r.frames,10000000,3000,4,h); CHECK(!a.source_timing_confident);
   Fill(r,350); for(size_t i=0;i<4;++i) r.frames[i].os_render_queue_start_time-=3000;
-  a=latency::Analyze(r.frames,10000000,3500,2,h); CHECK(a.median_queue_wait_us==0);
-  Fill(r,400); a=latency::Analyze(r.frames,10000000,7000,2,h); CHECK(!a.fresh);
+  a=latency::Analyze(r.frames,10000000,3500,4,h); CHECK(a.median_queue_wait_us==0);
+  Fill(r,400); a=latency::Analyze(r.frames,10000000,7000,4,h); CHECK(!a.fresh);
   Fill(r,450); a=latency::Analyze(r.frames,10000000,7500,3,h); CHECK(!a.fresh);
   Fill(r,500); for(auto& f:r.frames) f.os_render_queue_start_time=0;
-  a=latency::Analyze(r.frames,10000000,8000,3,h); CHECK(!a.source_timing_confident);
+  a=latency::Analyze(r.frames,10000000,8000,3,h);
+  CHECK(a.source_timing_confident && !a.queue_timing_confident);
 
   latency::QueueTrial trial;
   CHECK(trial.Update(0,1,4,true,97,10000,3000,12000)==0);

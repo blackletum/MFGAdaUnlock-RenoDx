@@ -51,12 +51,12 @@ int main() {
   CHECK(ResolveOutputTargetFps(true, 240, 100, 10000) == 240);
   CHECK(ResolveOutputTargetFps(false, 240, 100, 16667) == 100);
   CHECK(ResolveOutputTargetFps(false, 240, 0, 8333) == 120);
-  CHECK(RecommendQueueTrimSourceCapFps(10000, 3000, 10000, true) == 97);
-  CHECK(RecommendQueueTrimSourceCapFps(20833, 170, 20833, true) == 0);
-  CHECK(RecommendQueueTrimSourceCapFps(10000, 3000, 10000, false) == 0);
+  CHECK(RecommendQueueTrimSourceCapFps(10000, 3000, true) == 97);
+  CHECK(RecommendQueueTrimSourceCapFps(20833, 170, true) == 0);
+  CHECK(RecommendQueueTrimSourceCapFps(10000, 3000, false) == 0);
 
   const auto oversubscribed = BuildLatencyGuardRecommendation(
-      true, 240, 100, 0, 4, 10000, 3000, 10000,
+      true, 240, 100, 0, 4, 10000, 3000,
       true);  // ~100 source / ~400 output with a meaningful queue.
   CHECK(oversubscribed.output_target_fps == 240);
   CHECK(oversubscribed.source_cap_fps == 97);
@@ -78,7 +78,7 @@ int main() {
       oversubscribed));
 
   const auto within_target = BuildLatencyGuardRecommendation(
-      true, 240, 0, 0, 4, 16667, 200, 16667,
+      true, 240, 0, 0, 4, 16667, 200,
       true);  // ~60 source / ~240 output with no queue pressure.
   CHECK(within_target.suggested_total_multiplier == 4);
   CHECK(!within_target.multiplier_may_be_higher_than_needed);
@@ -89,7 +89,7 @@ int main() {
 
   // Output oversubscription alone must never cut real FPS to refresh / MFG.
   const auto no_queue = BuildLatencyGuardRecommendation(
-      true, 240, 0, 0, 4, 10000, 200, 10000, true);
+      true, 240, 0, 0, 4, 10000, 200, true);
   CHECK(no_queue.source_oversubscribed);
   CHECK(no_queue.source_cap_fps == 0);
   CHECK(!ShouldApplyAutomaticLatencyCap(

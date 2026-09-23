@@ -294,11 +294,13 @@ inline GuardObservation ObserveGuard(IUnknown* device, uint64_t epoch = 0) {
     result.latency_status = get_latency(device, &latency);
     if (result.latency_status == kOk) {
       thread_local latency::History history{};
-      LARGE_INTEGER frequency{};
+      LARGE_INTEGER frequency{}, current_counter{};
       QueryPerformanceFrequency(&frequency);
+      QueryPerformanceCounter(&current_counter);
       static_cast<latency::Report<LatencyFrame>&>(result) =
           latency::Analyze(latency.frames, static_cast<uint64_t>(frequency.QuadPart),
-                           GetTickCount64(), reinterpret_cast<uintptr_t>(device) ^ epoch, history);
+                           GetTickCount64(), reinterpret_cast<uintptr_t>(device) ^ epoch,
+                           history, static_cast<uint64_t>(current_counter.QuadPart));
     }
   }
   return result;
