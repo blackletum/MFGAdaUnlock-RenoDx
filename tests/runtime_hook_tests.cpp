@@ -18,13 +18,16 @@
 namespace fc = mfgunlock::framecount;
 std::vector<unsigned int> requests;
 std::vector<sl::DLSSGMode> modes;
+std::vector<uint32_t> option_flags;
 unsigned int accepted_count = 1;
 bool transient = false;
 unsigned int get_state_calls = 0;
 size_t last_state_version = 0;
+bool vram_request_seen = false;
 sl::Result Provider(const sl::ViewportHandle&, const sl::DLSSGOptions& options) {
   requests.push_back(options.numFramesToGenerate);
   modes.push_back(options.mode);
+  option_flags.push_back(static_cast<uint32_t>(options.flags));
   if (options.mode == sl::DLSSGMode::eOff) return sl::Result::eOk;
   if (transient && requests.size() == 1) return sl::Result::eErrorInvalidState;
   return options.numFramesToGenerate == accepted_count
@@ -45,9 +48,15 @@ sl::Result WorkingGetState(const sl::ViewportHandle&, sl::DLSSGState&,
 }
 
 sl::Result NativeState(const sl::ViewportHandle&, sl::DLSSGState& state,
-                       const sl::DLSSGOptions*) {
+                       const sl::DLSSGOptions* options) {
   ++get_state_calls;
   last_state_version = state.structVersion;
+  if (options != nullptr &&
+      (static_cast<uint32_t>(options->flags) &
+       static_cast<uint32_t>(sl::DLSSGFlags::eRequestVRAMEstimate)) != 0) {
+    vram_request_seen = true;
+    state.estimatedVRAMUsageInBytes = 512ull << 20;
+  }
   state.numFramesToGenerateMax = 1;
   state.numFramesActuallyPresented = 3;
   state.bIsVsyncSupportAvailable = sl::Boolean::eFalse;
@@ -194,6 +203,65 @@ int main() {
   state.structVersion = sl::kStructVersion2;
   CHECK(fc::internal::HookedGetState(viewport, state, nullptr) == sl::Result::eOk);
   CHECK(last_state_version == sl::kStructVersion4);
+
+  // Automatic multiplier trials are runtime-only: they alter the next
+  // forwarded fixed request without overwriting the saved selection.
+  fc::g_dynamic_mfg_enabled.store(false);
+  fc::g_force_multiplier.store(4);
+  fc::g_latency_guard_multiplier_override.store(3);
+  accepted_count = 2;
+  options.mode = sl::DLSSGMode::eOn;
+  options.numFramesToGenerate = 1;
+  requests.clear();
+  CHECK(fc::internal::HookedSetOptions(viewport, options) == sl::Result::eOk);
+  CHECK((requests == std::vector<unsigned int>{2}));
+  CHECK(fc::g_force_multiplier.load() == 4);
+  fc::g_latency_guard_multiplier_override.store(0);
+
+  // The diagnostics-only VRAM request is injected into one natural GetState
+  // call and its result is retained without changing normal callers.
+  mfgunlock::memorypolicy::EstimateInputs memory_input{};
+  memory_input.options_valid = true;
+  memory_input.generated_frames = 3;
+  memory_input.back_buffers = 3;
+  memory_input.color_width = 2560;
+  memory_input.color_height = 1440;
+  memory_input.color_format = 24;
+  memory_input.mvec_depth_width = 1708;
+  memory_input.mvec_depth_height = 960;
+  memory_input.mvec_format = 34;
+  memory_input.depth_format = 19;
+  const auto memory_plan =
+      mfgunlock::memorypolicy::BuildEstimatePlan(memory_input);
+  CHECK(memory_plan.readiness ==
+        mfgunlock::memorypolicy::EstimateReadiness::kReady);
+  fc::ResetVramEstimate();
+  CHECK(fc::QueueVramEstimate(0, memory_plan));
+  vram_request_seen = false;
+  state = {};
+  CHECK(fc::internal::HookedGetState(viewport, state, nullptr) ==
+        sl::Result::eOk);
+  CHECK(vram_request_seen);
+  CHECK(fc::g_vram_estimate_status.load() == static_cast<unsigned int>(
+      fc::VramEstimateStatus::kReady));
+  CHECK(fc::g_vram_estimate_bytes.load() == (512ull << 20));
+
+  // Optional VRAM release changes only an FG-off retain request. The caller's
+  // options stay untouched and active Frame Generation options are unaffected.
+  fc::g_release_resources_when_off.store(true);
+  options.mode = sl::DLSSGMode::eOff;
+  options.flags = sl::DLSSGFlags::eRetainResourcesWhenOff;
+  option_flags.clear();
+  CHECK(fc::internal::HookedSetOptions(viewport, options) == sl::Result::eOk);
+  CHECK(option_flags.size() == 1);
+  CHECK((option_flags[0] & static_cast<uint32_t>(
+             sl::DLSSGFlags::eRetainResourcesWhenOff)) == 0);
+  CHECK((static_cast<uint32_t>(options.flags) & static_cast<uint32_t>(
+             sl::DLSSGFlags::eRetainResourcesWhenOff)) != 0);
+  CHECK(fc::g_release_resources_seen.load());
+  CHECK(fc::g_release_resources_applied.load());
+  fc::g_release_resources_when_off.store(false);
+  options.flags = {};
 
   // The release Outlaws path must leave the actual function pointer native;
   // wrapping it can recurse through the game's Streamline chain and gray out

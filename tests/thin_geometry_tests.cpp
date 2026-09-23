@@ -56,7 +56,9 @@ int main() {
   CHECK(adaptive.find(mfgunlock::qualityrefinement::kBlendWeights) != std::string::npos);
   CHECK(adaptive.find(mfgunlock::qualityborder::kBorderWeights) != std::string::npos);
   CHECK(adaptive.find(mfgunlock::adaptivequality::kCandidateArbitration) != std::string::npos);
-  CHECK(adaptive.find("MFGUNLOCK_CANDIDATE_ARBITRATION_V1") != std::string::npos);
+  CHECK(adaptive.find("MFGUNLOCK_CANDIDATE_ARBITRATION_V2") != std::string::npos);
+  CHECK(adaptive.find("selp.f32 %qf2, %qf1, %qf0, %qv2;") != std::string::npos);
+  CHECK(adaptive.find("selp.f32 %qf3, %qf10, %qf8, %qv2;") != std::string::npos);
   g_adaptive_quality_enabled = false;
 
   const float unchanged = mfgunlock::adaptivequality::ArbitrateExtraWeight(

@@ -44,6 +44,7 @@ int main() {
   using mfgunlock::pacing::RecommendQueueTrimSourceCapFps;
   using mfgunlock::pacing::ResolveOutputTargetFps;
   using mfgunlock::pacing::ShouldApplyAutomaticLatencyCap;
+  using mfgunlock::pacing::ShouldTrialLowerMultiplier;
 
   CHECK(FrameLimitUsToFps(0) == 0);
   CHECK(FrameLimitUsToFps(16667) == 60);
@@ -94,6 +95,15 @@ int main() {
   CHECK(!ShouldApplyAutomaticLatencyCap(
       LatencyGuardMode::kAutomatic, MarkerHealth::kHealthy, true, true,
       no_queue));
+  CHECK(ShouldTrialLowerMultiplier(
+      LatencyGuardMode::kAutomatic, MarkerHealth::kHealthy, 4, 3, false,
+      true, true));
+  CHECK(!ShouldTrialLowerMultiplier(
+      LatencyGuardMode::kMonitor, MarkerHealth::kHealthy, 4, 3, false,
+      true, true));
+  CHECK(!ShouldTrialLowerMultiplier(
+      LatencyGuardMode::kAutomatic, MarkerHealth::kHealthy, 4, 3, true,
+      true, true));
 
   CHECK(PreserveStricterNativeLimit(0, 17241) == 17241);
   CHECK(PreserveStricterNativeLimit(20000, 17241) == 20000);

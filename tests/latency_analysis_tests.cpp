@@ -38,6 +38,8 @@ int main() {
   Fill(r,50); a=latency::Analyze(r.frames,10000000,1500,1,h);
   CHECK(a.source_timing_confident && a.source_interval_us==10000 && a.median_queue_wait_us==0);
   CHECK(a.median_pipeline_latency_us==8000 && a.new_frames==50);
+  CHECK(a.p95_pipeline_latency_us==8000 && a.p95_gpu_frame_time_us==10000);
+  CHECK(a.median_simulation_cpu_us==1000 && a.median_submit_cpu_us==500);
   a=latency::Analyze(r.frames,10000000,2000,1,h); CHECK(!a.fresh && !a.source_timing_confident);
   Fill(r,100,10); h={}; a=latency::Analyze(r.frames,10000000,1000,2,h);
   Fill(r,150,10); a=latency::Analyze(r.frames,10000000,1500,2,h);
@@ -65,6 +67,14 @@ int main() {
   CHECK(trial.Update(36000,1,4,true,0,14000,1000,11000)==0); // base-FPS loss rolls back
   CHECK(trial.Update(36500,1,4,true,97,10000,3000,12000)==0); // cooldown
   CHECK(trial.Update(67000,1,4,false,97,10000,3000,12000)==0);
+  latency::MultiplierTrial multiplier_trial;
+  CHECK(multiplier_trial.Update(0, 1, 4, 4, true, 3, 10000, 3000, 12000, 4000) == 0);
+  for (uint64_t t=30000; t<31500; t+=500)
+    CHECK(multiplier_trial.Update(t, 1, 4, 4, true, 3, 10000, 3000, 12000, 4000) == 0);
+  CHECK(multiplier_trial.Update(31500, 1, 4, 4, true, 3, 10000, 3000, 12000, 4000) == 3);
+  CHECK(multiplier_trial.Update(35500, 1, 4, 3, true, 3, 10000, 500, 11000, 3500) == 3);
+  CHECK(multiplier_trial.accepted);
+  CHECK(multiplier_trial.Update(36000, 1, 4, 3, true, 3, 13000, 500, 11000, 3500) == 0);
   h = {}; // one hour of synthetic 100-FPS sampling; no real time sleeps
   for (uint64_t i=0; i<7200; ++i) {
     Fill(r,i*50); a=latency::Analyze(r.frames,10000000,500*i,11,h);

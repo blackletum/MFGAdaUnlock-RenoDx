@@ -57,6 +57,10 @@ target_include_directories(input_diagnostics_tests SYSTEM PRIVATE
 add_test(NAME input_diagnostics_tests COMMAND input_diagnostics_tests)
 add_executable(pacing_policy_tests pacing_policy_tests.cpp)
 add_test(NAME pacing_policy_tests COMMAND pacing_policy_tests)
+add_executable(memory_policy_tests memory_policy_tests.cpp)
+target_include_directories(memory_policy_tests SYSTEM PRIVATE
+  "${RENODX_SOURCE_DIR}/external/Streamline/include")
+add_test(NAME memory_policy_tests COMMAND memory_policy_tests)
 add_executable(force_policy_tests force_policy_tests.cpp)
 target_include_directories(force_policy_tests SYSTEM PRIVATE
   "${RENODX_SOURCE_DIR}/external/Streamline/include")

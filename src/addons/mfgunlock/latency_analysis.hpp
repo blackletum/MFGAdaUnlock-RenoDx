@@ -18,7 +18,11 @@ template <class Frame> struct Report {
   uint32_t valid_latency_frames = 0, consecutive_timing_samples = 0;
   uint32_t source_interval_us = 0, simulation_interval_us = 0;
   uint32_t median_queue_wait_us = 0, median_pipeline_latency_us = 0;
+  uint32_t p95_queue_wait_us = 0, p95_pipeline_latency_us = 0;
   uint32_t median_input_to_gpu_end_us = 0, median_gpu_frame_time_us = 0;
+  uint32_t p95_gpu_frame_time_us = 0, median_gpu_active_us = 0;
+  uint32_t median_input_to_simulation_us = 0;
+  uint32_t median_simulation_cpu_us = 0, median_submit_cpu_us = 0;
   uint32_t median_ai_frame_time_us = 0, new_frames = 0;
   Units timestamp_units = Units::kUnknown;
   uint64_t qpc_frequency = 0;
@@ -71,7 +75,8 @@ Report<Frame> Analyze(const Frame (&frames)[N], uint64_t frequency,
   if (direct && (!qpc || frequency == 1000000)) out.timestamp_units = Units::kMicroseconds;
   else if (qpc && !direct) out.timestamp_units = Units::kQpc;
 
-  Samples<N> simulation, present, gpu, queue, pipeline, input, ai;
+  Samples<N> simulation, present, gpu, gpu_active, queue, pipeline, input,
+      input_to_simulation, simulation_cpu, submit_cpu, ai;
   uint32_t run = 0;
   auto duration = [&](uint64_t a, uint64_t b, auto& samples) {
     // Zero duration is valid; missing endpoints are not.
@@ -95,18 +100,32 @@ Report<Frame> Analyze(const Frame (&frames)[N], uint64_t frequency,
       duration(frames[i-1].present_start_time, f.present_start_time, present);
     } else run = 0;
     if (f.gpu_frame_time_us >= 1000 && f.gpu_frame_time_us <= 100000) gpu.Add(f.gpu_frame_time_us);
+    if (f.gpu_active_render_time_us && f.gpu_active_render_time_us <= 1000000)
+      gpu_active.Add(f.gpu_active_render_time_us);
     duration(f.os_render_queue_start_time, f.gpu_render_start_time, queue);
     duration(f.simulation_start_time, f.gpu_render_end_time, pipeline);
     duration(f.input_sample_time, f.gpu_render_end_time, input);
+    duration(f.input_sample_time, f.simulation_start_time, input_to_simulation);
+    duration(f.simulation_start_time, f.simulation_end_time, simulation_cpu);
+    duration(f.render_submit_start_time, f.render_submit_end_time, submit_cpu);
     if (f.ai_frame_time_us) ai.Add(f.ai_frame_time_us);
   }
-  simulation.Sort(); present.Sort(); gpu.Sort(); queue.Sort(); pipeline.Sort(); input.Sort(); ai.Sort();
+  simulation.Sort(); present.Sort(); gpu.Sort(); gpu_active.Sort(); queue.Sort();
+  pipeline.Sort(); input.Sort(); input_to_simulation.Sort();
+  simulation_cpu.Sort(); submit_cpu.Sort(); ai.Sort();
   out.consecutive_timing_samples = run; // contiguous suffix, not sum across gaps
   out.simulation_interval_us = simulation.P(50);
   out.median_gpu_frame_time_us = gpu.P(50);
+  out.p95_gpu_frame_time_us = gpu.P(95);
+  out.median_gpu_active_us = gpu_active.P(50);
   out.median_queue_wait_us = queue.P(50);
+  out.p95_queue_wait_us = queue.P(95);
   out.median_pipeline_latency_us = pipeline.P(50);
+  out.p95_pipeline_latency_us = pipeline.P(95);
   out.median_input_to_gpu_end_us = input.P(50);
+  out.median_input_to_simulation_us = input_to_simulation.P(50);
+  out.median_simulation_cpu_us = simulation_cpu.P(50);
+  out.median_submit_cpu_us = submit_cpu.P(50);
   out.median_ai_frame_time_us = ai.P(50);
   if (history.seen && history.epoch == epoch && now_ms >= history.polled_ms &&
       now_ms - history.polled_ms <= 2000 && out.latest.frame_id > history.frame &&

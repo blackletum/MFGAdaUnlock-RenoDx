@@ -25,6 +25,16 @@ enum class MarkerHealth : uint32_t {
   kUnstableTiming = 6,
 };
 
+enum class LatencyBottleneck : uint32_t {
+  kInsufficientData = 0,
+  kBalanced,
+  kDisplayOversubscription,
+  kRenderQueue,
+  kFrameGeneration,
+  kGpuWork,
+  kCpuOrSource,
+};
+
 struct LatencyGuardRecommendation {
   uint32_t output_target_fps = 0;
   uint32_t source_cap_fps = 0;
@@ -163,6 +173,45 @@ inline constexpr bool ShouldApplyAutomaticLatencyCap(
          reflex_options_seen && recommendation.data_complete &&
          recommendation.source_cap_fps != 0 &&
          (recommendation.sustained_queue_pressure || sustained_queue_pressure);
+}
+
+// Classification is deliberately diagnostic. It attributes the largest
+// observed stage without pretending that marker-to-GPU time is end-to-end
+// display latency or that every large value is actionable by this addon.
+inline constexpr LatencyBottleneck ClassifyLatencyBottleneck(
+    bool timing_confident, bool oversubscribed, uint32_t queue_p95_us,
+    uint32_t source_interval_us, uint32_t gpu_active_us,
+    uint32_t ai_frame_time_us) {
+  if (!timing_confident || source_interval_us == 0)
+    return LatencyBottleneck::kInsufficientData;
+  if (oversubscribed && queue_p95_us >= 1500 &&
+      static_cast<uint64_t>(queue_p95_us) * 4ull >= source_interval_us)
+    return LatencyBottleneck::kDisplayOversubscription;
+  if (queue_p95_us >= 1500 &&
+      static_cast<uint64_t>(queue_p95_us) * 4ull >= source_interval_us)
+    return LatencyBottleneck::kRenderQueue;
+  if (ai_frame_time_us >= 3000 && ai_frame_time_us > gpu_active_us / 3)
+    return LatencyBottleneck::kFrameGeneration;
+  if (gpu_active_us != 0 &&
+      static_cast<uint64_t>(gpu_active_us) * 100ull >=
+          static_cast<uint64_t>(source_interval_us) * 80ull)
+    return LatencyBottleneck::kGpuWork;
+  if (source_interval_us >= 20000 && gpu_active_us != 0 &&
+      static_cast<uint64_t>(gpu_active_us) * 2ull < source_interval_us)
+    return LatencyBottleneck::kCpuOrSource;
+  return LatencyBottleneck::kBalanced;
+}
+
+inline constexpr bool ShouldTrialLowerMultiplier(
+    LatencyGuardMode mode, MarkerHealth marker_health,
+    uint32_t configured_multiplier, uint32_t suggested_multiplier,
+    bool dynamic_active, bool source_oversubscribed,
+    bool sustained_queue_pressure) {
+  return mode == LatencyGuardMode::kAutomatic &&
+         marker_health == MarkerHealth::kHealthy && !dynamic_active &&
+         configured_multiplier >= 3 && suggested_multiplier >= 2 &&
+         suggested_multiplier < configured_multiplier &&
+         source_oversubscribed && sustained_queue_pressure;
 }
 
 inline constexpr bool ShouldApplyReflexSourceCap(

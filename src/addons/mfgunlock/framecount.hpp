@@ -56,6 +56,7 @@
 #include "./force_policy.hpp"
 #include "./hdr_compat.hpp"
 #include "./input_diagnostics.hpp"
+#include "./memory_policy.hpp"
 #include "./ngx_hook.hpp"
 #include "./pacing_policy.hpp"
 #include "./quality_guard.hpp"
@@ -192,10 +193,24 @@ inline std::atomic_bool g_latency_guard_multiplier_high{false};
 inline std::atomic<unsigned int> g_latency_guard_marker_health{
     static_cast<unsigned int>(pacing::MarkerHealth::kUnavailable)};
 inline std::atomic<unsigned int> g_latency_guard_queue_wait_us{0};
+inline std::atomic<unsigned int> g_latency_guard_queue_p95_us{0};
 inline std::atomic<unsigned int> g_latency_guard_gpu_frame_time_us{0};
+inline std::atomic<unsigned int> g_latency_guard_gpu_frame_p95_us{0};
+inline std::atomic<unsigned int> g_latency_guard_gpu_active_us{0};
 inline std::atomic<unsigned int> g_latency_guard_pipeline_latency_us{0};
+inline std::atomic<unsigned int> g_latency_guard_pipeline_p95_us{0};
 inline std::atomic<unsigned int> g_latency_guard_input_to_gpu_end_us{0};
+inline std::atomic<unsigned int> g_latency_guard_input_to_simulation_us{0};
+inline std::atomic<unsigned int> g_latency_guard_simulation_cpu_us{0};
+inline std::atomic<unsigned int> g_latency_guard_submit_cpu_us{0};
 inline std::atomic<unsigned int> g_latency_guard_ai_frame_time_us{0};
+inline std::atomic<unsigned int> g_latency_guard_sample_cost_us{0};
+inline std::atomic_bool g_latency_guard_iflip_known{false};
+inline std::atomic_bool g_latency_guard_iflip_active{false};
+inline std::atomic<unsigned int> g_latency_guard_bottleneck{
+    static_cast<unsigned int>(pacing::LatencyBottleneck::kInsufficientData)};
+inline std::atomic<unsigned int> g_latency_guard_multiplier_override{0};
+inline std::atomic_bool g_latency_guard_multiplier_trial_accepted{false};
 inline std::atomic<unsigned int> g_latency_guard_timing_samples{0};
 inline std::atomic_bool g_latency_guard_timing_confident{false};
 inline std::atomic_bool g_latency_guard_oversubscribed{false};
@@ -207,6 +222,174 @@ inline std::atomic_bool g_latency_guard_refresh_pending{false};
 inline std::atomic<unsigned long long> g_latency_guard_ui_heartbeat_ms{0};
 // 0 = native/no addon cap, 1 = legacy explicit source cap, 2 = Latency Guard.
 inline std::atomic<unsigned int> g_reflex_limit_source{0};
+
+enum class VramEstimateStatus : uint32_t {
+  kIdle = 0,
+  kWaitingInputs,
+  kPending,
+  kReady,
+  kUnsupported,
+  kFailed,
+};
+
+struct VramEstimateRequest {
+  sl::DLSSGOptions options{};
+  uint32_t viewport = 0;
+  uint64_t signature = 0;
+  uint64_t comparison_signature = 0;
+  bool ui_recomposition = false;
+  bool valid = false;
+};
+
+inline SRWLOCK g_vram_estimate_lock = SRWLOCK_INIT;
+inline VramEstimateRequest g_vram_estimate_request{};
+inline std::atomic<unsigned int> g_vram_estimate_status{
+    static_cast<unsigned int>(VramEstimateStatus::kIdle)};
+inline std::atomic<unsigned int> g_vram_estimate_readiness{
+    static_cast<unsigned int>(
+        memorypolicy::EstimateReadiness::kMissingOptions)};
+inline std::atomic<unsigned int> g_vram_estimate_result{0};
+inline std::atomic<uint64_t> g_vram_estimate_bytes{0};
+inline std::atomic<uint64_t> g_vram_estimate_signature{0};
+inline std::atomic<uint64_t> g_vram_comparison_signature{0};
+inline std::atomic<uint64_t> g_vram_native_estimate_bytes{0};
+inline std::atomic<uint64_t> g_vram_ui_estimate_bytes{0};
+inline std::atomic_bool g_vram_native_estimate_ready{false};
+inline std::atomic_bool g_vram_ui_estimate_ready{false};
+inline std::atomic_bool g_vram_estimate_ui_recomposition{false};
+inline std::atomic<unsigned int> g_vram_volatile_input_count{0};
+inline std::atomic<unsigned int> g_vram_estimate_flags{0};
+inline std::atomic_bool g_release_resources_when_off{false};
+inline std::atomic_bool g_release_resources_seen{false};
+inline std::atomic_bool g_release_resources_applied{false};
+
+inline void SetVramEstimateWaiting(
+    memorypolicy::EstimateReadiness readiness,
+    unsigned int volatile_inputs = 0) {
+  g_vram_estimate_readiness.store(static_cast<unsigned int>(readiness),
+                                  std::memory_order_relaxed);
+  g_vram_volatile_input_count.store(volatile_inputs,
+                                    std::memory_order_relaxed);
+  const auto current = static_cast<VramEstimateStatus>(
+      g_vram_estimate_status.load(std::memory_order_acquire));
+  // A contended or momentarily incomplete UI snapshot must not erase a useful
+  // completed result. A different complete signature queues a new request.
+  if (current == VramEstimateStatus::kIdle ||
+      current == VramEstimateStatus::kWaitingInputs ||
+      current == VramEstimateStatus::kFailed) {
+    g_vram_estimate_status.store(
+        static_cast<unsigned int>(VramEstimateStatus::kWaitingInputs),
+        std::memory_order_release);
+  }
+}
+
+inline bool QueueVramEstimate(uint32_t viewport,
+                              const memorypolicy::EstimatePlan& plan) {
+  if (plan.readiness != memorypolicy::EstimateReadiness::kReady ||
+      plan.signature == 0)
+    return false;
+  g_vram_estimate_readiness.store(
+      static_cast<unsigned int>(memorypolicy::EstimateReadiness::kReady),
+      std::memory_order_relaxed);
+  g_vram_volatile_input_count.store(plan.volatile_inputs,
+                                    std::memory_order_relaxed);
+  const uint64_t previous_comparison =
+      g_vram_comparison_signature.load(std::memory_order_acquire);
+  if (previous_comparison != 0 &&
+      previous_comparison != plan.comparison_signature) {
+    g_vram_native_estimate_ready.store(false, std::memory_order_relaxed);
+    g_vram_ui_estimate_ready.store(false, std::memory_order_relaxed);
+    g_vram_native_estimate_bytes.store(0, std::memory_order_relaxed);
+    g_vram_ui_estimate_bytes.store(0, std::memory_order_relaxed);
+  }
+  const auto status = static_cast<VramEstimateStatus>(
+      g_vram_estimate_status.load(std::memory_order_acquire));
+  if (g_vram_estimate_signature.load(std::memory_order_acquire) ==
+          plan.signature &&
+      (status == VramEstimateStatus::kPending ||
+       status == VramEstimateStatus::kReady ||
+       status == VramEstimateStatus::kFailed)) {
+    return false;
+  }
+
+  AcquireSRWLockExclusive(&g_vram_estimate_lock);
+  g_vram_estimate_request.options = plan.options;
+  g_vram_estimate_request.options.next = nullptr;
+  g_vram_estimate_request.viewport = viewport;
+  g_vram_estimate_request.signature = plan.signature;
+  g_vram_estimate_request.comparison_signature =
+      plan.comparison_signature;
+  g_vram_estimate_request.ui_recomposition = plan.ui_recomposition;
+  g_vram_estimate_request.valid = true;
+  ReleaseSRWLockExclusive(&g_vram_estimate_lock);
+  g_vram_estimate_signature.store(plan.signature, std::memory_order_release);
+  g_vram_estimate_ui_recomposition.store(plan.ui_recomposition,
+                                         std::memory_order_relaxed);
+  g_vram_estimate_flags.store(
+      static_cast<unsigned int>(plan.options.flags),
+      std::memory_order_relaxed);
+  g_vram_estimate_status.store(
+      static_cast<unsigned int>(VramEstimateStatus::kPending),
+      std::memory_order_release);
+  return true;
+}
+
+inline bool TakeVramEstimate(uint32_t viewport, VramEstimateRequest& request) {
+  if (g_vram_estimate_status.load(std::memory_order_acquire) !=
+      static_cast<unsigned int>(VramEstimateStatus::kPending))
+    return false;
+  AcquireSRWLockExclusive(&g_vram_estimate_lock);
+  const bool available = g_vram_estimate_request.valid &&
+                         g_vram_estimate_request.viewport == viewport;
+  if (available) {
+    request = g_vram_estimate_request;
+    g_vram_estimate_request.valid = false;
+  }
+  ReleaseSRWLockExclusive(&g_vram_estimate_lock);
+  return available;
+}
+
+inline void CompleteVramEstimate(const VramEstimateRequest& request,
+                                 sl::Result result, uint64_t bytes) {
+  g_vram_estimate_result.store(static_cast<unsigned int>(result),
+                               std::memory_order_relaxed);
+  g_vram_estimate_bytes.store(bytes, std::memory_order_relaxed);
+  if (result == sl::Result::eOk && bytes != 0) {
+    g_vram_comparison_signature.store(request.comparison_signature,
+                                      std::memory_order_release);
+    if (request.ui_recomposition) {
+      g_vram_ui_estimate_bytes.store(bytes, std::memory_order_relaxed);
+      g_vram_ui_estimate_ready.store(true, std::memory_order_release);
+    } else {
+      g_vram_native_estimate_bytes.store(bytes, std::memory_order_relaxed);
+      g_vram_native_estimate_ready.store(true, std::memory_order_release);
+    }
+    g_vram_estimate_status.store(
+        static_cast<unsigned int>(VramEstimateStatus::kReady),
+        std::memory_order_release);
+  } else {
+    g_vram_estimate_status.store(
+        static_cast<unsigned int>(VramEstimateStatus::kFailed),
+        std::memory_order_release);
+  }
+}
+
+inline void ResetVramEstimate() {
+  AcquireSRWLockExclusive(&g_vram_estimate_lock);
+  g_vram_estimate_request = {};
+  ReleaseSRWLockExclusive(&g_vram_estimate_lock);
+  g_vram_estimate_status.store(
+      static_cast<unsigned int>(VramEstimateStatus::kIdle),
+      std::memory_order_release);
+  g_vram_estimate_signature.store(0, std::memory_order_relaxed);
+  g_vram_comparison_signature.store(0, std::memory_order_relaxed);
+  g_vram_estimate_bytes.store(0, std::memory_order_relaxed);
+  g_vram_native_estimate_bytes.store(0, std::memory_order_relaxed);
+  g_vram_ui_estimate_bytes.store(0, std::memory_order_relaxed);
+  g_vram_native_estimate_ready.store(false, std::memory_order_relaxed);
+  g_vram_ui_estimate_ready.store(false, std::memory_order_relaxed);
+  g_vram_estimate_flags.store(0, std::memory_order_relaxed);
+}
 
 // Dynamic MFG is release-supported only on the validated 310.9.1 / 2.14.1
 // stack. The provider capability bit remains authoritative, while these loaded
@@ -580,11 +763,21 @@ struct QualityViewportState {
   std::atomic<uint32_t> mode{0};
   std::atomic<uint32_t> generated_frames{0};
   std::atomic<uint32_t> flags{0};
+  std::atomic<uint32_t> dynamic_width{0};
+  std::atomic<uint32_t> dynamic_height{0};
+  std::atomic<uint32_t> back_buffers{0};
   std::atomic<uint32_t> color_width{0};
   std::atomic<uint32_t> color_height{0};
   std::atomic<uint32_t> color_format{0};
   std::atomic<uint32_t> mvec_width{0};
   std::atomic<uint32_t> mvec_height{0};
+  std::atomic<uint32_t> mvec_format{0};
+  std::atomic<uint32_t> depth_format{0};
+  std::atomic<uint32_t> hudless_format{0};
+  std::atomic<uint32_t> ui_format{0};
+  std::atomic<uint32_t> queue_parallelism_mode{0};
+  std::atomic<int> ui_recomposition{-1};
+  std::atomic<uint32_t> dynamic_target_bits{0};
   std::atomic<uint32_t> backbuffer_width{0};
   std::atomic<uint32_t> backbuffer_height{0};
   std::atomic<uint32_t> backbuffer_format{0};
@@ -670,20 +863,59 @@ inline void ObserveOptionsTransition(const sl::ViewportHandle& viewport,
       (state->mode.load(std::memory_order_relaxed) != mode ||
        state->generated_frames.load(std::memory_order_relaxed) != generated_frames ||
        state->flags.load(std::memory_order_relaxed) != flags ||
+       state->dynamic_width.load(std::memory_order_relaxed) !=
+           options.dynamicResWidth ||
+       state->dynamic_height.load(std::memory_order_relaxed) !=
+           options.dynamicResHeight ||
+       state->back_buffers.load(std::memory_order_relaxed) !=
+           options.numBackBuffers ||
        state->color_width.load(std::memory_order_relaxed) != options.colorWidth ||
        state->color_height.load(std::memory_order_relaxed) != options.colorHeight ||
        state->color_format.load(std::memory_order_relaxed) != options.colorBufferFormat ||
        state->mvec_width.load(std::memory_order_relaxed) != options.mvecDepthWidth ||
-       state->mvec_height.load(std::memory_order_relaxed) != options.mvecDepthHeight);
+       state->mvec_height.load(std::memory_order_relaxed) != options.mvecDepthHeight ||
+       state->mvec_format.load(std::memory_order_relaxed) != options.mvecBufferFormat ||
+       state->depth_format.load(std::memory_order_relaxed) != options.depthBufferFormat ||
+       state->hudless_format.load(std::memory_order_relaxed) != options.hudLessBufferFormat ||
+       state->ui_format.load(std::memory_order_relaxed) != options.uiBufferFormat);
 
   state->mode.store(mode, std::memory_order_relaxed);
   state->generated_frames.store(generated_frames, std::memory_order_relaxed);
   state->flags.store(flags, std::memory_order_relaxed);
+  state->dynamic_width.store(options.dynamicResWidth,
+                             std::memory_order_relaxed);
+  state->dynamic_height.store(options.dynamicResHeight,
+                              std::memory_order_relaxed);
+  state->back_buffers.store(options.numBackBuffers,
+                            std::memory_order_relaxed);
   state->color_width.store(options.colorWidth, std::memory_order_relaxed);
   state->color_height.store(options.colorHeight, std::memory_order_relaxed);
   state->color_format.store(options.colorBufferFormat, std::memory_order_relaxed);
   state->mvec_width.store(options.mvecDepthWidth, std::memory_order_relaxed);
   state->mvec_height.store(options.mvecDepthHeight, std::memory_order_relaxed);
+  state->mvec_format.store(options.mvecBufferFormat,
+                           std::memory_order_relaxed);
+  state->depth_format.store(options.depthBufferFormat,
+                            std::memory_order_relaxed);
+  state->hudless_format.store(options.hudLessBufferFormat,
+                              std::memory_order_relaxed);
+  state->ui_format.store(options.uiBufferFormat,
+                         std::memory_order_relaxed);
+  state->queue_parallelism_mode.store(
+      options.structVersion >= sl::kStructVersion3
+          ? static_cast<uint32_t>(options.queueParallelismMode)
+          : 0,
+      std::memory_order_relaxed);
+  state->ui_recomposition.store(
+      options.structVersion >= sl::kStructVersion4
+          ? static_cast<int>(options.enableUserInterfaceRecomposition)
+          : -1,
+      std::memory_order_relaxed);
+  state->dynamic_target_bits.store(
+      options.structVersion >= sl::kStructVersion5
+          ? memorypolicy::FloatBits(options.dynamicTargetFrameRate)
+          : memorypolicy::FloatBits(0.0f),
+      std::memory_order_relaxed);
   state->options_seen.store(true, std::memory_order_release);
   ReleaseSRWLockExclusive(&state->lock);
   if (changed && UsesQualityGuard()) {
@@ -728,6 +960,27 @@ inline sl::Result CallSetOptions(const sl::ViewportHandle& viewport,
   const auto real = g_real_set_options.load(std::memory_order_acquire);
   if (real == nullptr) return sl::Result::eErrorNotInitialized;
   const auto call_real = [&](const sl::DLSSGOptions& downstream) {
+    if (g_release_resources_when_off.load(std::memory_order_relaxed) &&
+        downstream.mode == sl::DLSSGMode::eOff &&
+        (static_cast<uint32_t>(downstream.flags) &
+         static_cast<uint32_t>(sl::DLSSGFlags::eRetainResourcesWhenOff)) != 0) {
+      sl::DLSSGOptions released{};
+      if (hdrcompat::BuildAdvancedOptions(
+              downstream, released, downstream.numFramesToGenerate, false,
+              false, false, 0.0f)) {
+        released.flags = static_cast<sl::DLSSGFlags>(
+            static_cast<uint32_t>(released.flags) &
+            ~static_cast<uint32_t>(
+                sl::DLSSGFlags::eRetainResourcesWhenOff));
+        inputdiag::ObserveOptions(static_cast<uint32_t>(viewport), released,
+                                  true);
+        const sl::Result result = real(viewport, released);
+        g_release_resources_seen.store(true, std::memory_order_release);
+        g_release_resources_applied.store(result == sl::Result::eOk,
+                                           std::memory_order_relaxed);
+        return result;
+      }
+    }
     inputdiag::ObserveOptions(static_cast<uint32_t>(viewport), downstream,
                               true);
     return real(viewport, downstream);
@@ -1350,8 +1603,16 @@ inline sl::Result HookedSetOptions(const sl::ViewportHandle& viewport,
       g_dynamic_support_seen.load(std::memory_order_acquire) &&
       g_dynamic_supported.load(std::memory_order_relaxed) &&
       !g_dynamic_runtime_declined.load(std::memory_order_relaxed);
-  const unsigned int multiplier =
+  const unsigned int configured_multiplier =
       g_force_multiplier.load(std::memory_order_relaxed);
+  const unsigned int latency_override =
+      g_latency_guard_multiplier_override.load(std::memory_order_acquire);
+  const unsigned int multiplier =
+      forcepolicy::IsFixedMultiplier(configured_multiplier) &&
+              forcepolicy::IsFixedMultiplier(latency_override) &&
+              latency_override < configured_multiplier
+          ? latency_override
+          : configured_multiplier;
   const uint32_t requested = options.numFramesToGenerate;
   if (game_enabled) {
     g_last_requested.store(options.numFramesToGenerate, std::memory_order_relaxed);
@@ -1617,6 +1878,17 @@ inline sl::Result HookedGetState(const sl::ViewportHandle& viewport, sl::DLSSGSt
     return real(viewport, state, options);
 
   const size_t caller_version = state.structVersion;
+  VramEstimateRequest vram_request{};
+  const bool vram_query = options == nullptr &&
+      TakeVramEstimate(static_cast<uint32_t>(viewport), vram_request);
+  if (vram_query) {
+    vram_request.options.flags = static_cast<sl::DLSSGFlags>(
+        static_cast<uint32_t>(vram_request.options.flags) |
+        static_cast<uint32_t>(sl::DLSSGFlags::eRequestVRAMEstimate));
+  }
+  const sl::DLSSGOptions* provider_options =
+      vram_query ? &vram_request.options : options;
+  sl::Result vram_query_result = sl::Result::eErrorNotInitialized;
   const bool outlaws_compat =
       g_outlaws_get_state_compat.load(std::memory_order_relaxed);
   sl::DLSSGState extended_state{};
@@ -1641,7 +1913,8 @@ inline sl::Result HookedGetState(const sl::ViewportHandle& viewport, sl::DLSSGSt
     // Query v4 into addon-owned storage so no field beyond the caller's ABI is
     // touched, then copy back only fields guaranteed by that caller version.
     extended_state.next = state.next;
-    result = real(viewport, extended_state, options);
+    result = real(viewport, extended_state, provider_options);
+    if (vram_query) vram_query_result = result;
     if (result == sl::Result::eOk) {
       g_dynamic_state_probe_failures.store(0, std::memory_order_relaxed);
       observed_state = &extended_state;
@@ -1675,7 +1948,19 @@ inline sl::Result HookedGetState(const sl::ViewportHandle& viewport, sl::DLSSGSt
       observed_state = &state;
     }
   } else {
-    result = real(viewport, state, options);
+    result = real(viewport, state, provider_options);
+    if (vram_query) vram_query_result = result;
+    if (vram_query && result != sl::Result::eOk) {
+      // The estimate is diagnostics only. Preserve the caller's normal
+      // GetState contract if the provider rejects the optional request.
+      result = real(viewport, state, options);
+    }
+  }
+  if (vram_query) {
+    const uint64_t bytes = vram_query_result == sl::Result::eOk
+        ? observed_state->estimatedVRAMUsageInBytes
+        : 0;
+    CompleteVramEstimate(vram_request, vram_query_result, bytes);
   }
   const unsigned int raw_result = static_cast<unsigned int>(result);
   g_state_result.store(raw_result, std::memory_order_relaxed);
@@ -1866,7 +2151,11 @@ inline void NotifySwapchainTransition() {
   g_latency_guard_clear_samples.store(0, std::memory_order_relaxed);
   g_latency_guard_candidate_cap_fps.store(0, std::memory_order_relaxed);
   g_latency_guard_active_source_cap_fps.store(0, std::memory_order_relaxed);
+  g_latency_guard_multiplier_override.store(0, std::memory_order_release);
+  g_latency_guard_multiplier_trial_accepted.store(false,
+                                                   std::memory_order_relaxed);
   g_latency_guard_sample_seen.store(false, std::memory_order_release);
+  ResetVramEstimate();
   internal::ForgetOutputDescriptions();
   if (internal::UsesQualityGuard()) {
     internal::RequestAllResets();
@@ -1910,6 +2199,8 @@ inline void NotifyFixedMultiplierChanged(unsigned int) {
   g_effective_request_seen.store(false, std::memory_order_release);
   g_declined_no_pacing.store(false, std::memory_order_relaxed);
   g_force_failed_for.store(0, std::memory_order_relaxed);
+  g_latency_guard_multiplier_override.store(0, std::memory_order_release);
+  g_latency_guard_epoch.fetch_add(1, std::memory_order_acq_rel);
   // Both selecting a fixed value and returning control to the game take effect
   // only on the next enabled game-side SetOptions call.
   g_fixed_override_status.store(

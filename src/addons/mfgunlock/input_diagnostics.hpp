@@ -110,6 +110,9 @@ struct OptionsSummary {
   uint32_t mode = 0;
   uint32_t generated_frames = 0;
   uint32_t flags = 0;
+  uint32_t dynamic_width = 0;
+  uint32_t dynamic_height = 0;
+  uint32_t back_buffers = 0;
   uint32_t mvec_depth_width = 0;
   uint32_t mvec_depth_height = 0;
   uint32_t color_width = 0;
@@ -119,6 +122,7 @@ struct OptionsSummary {
   uint32_t depth_format = 0;
   uint32_t hudless_format = 0;
   uint32_t ui_format = 0;
+  uint32_t queue_parallelism_mode = 0;
   int ui_recomposition = -1;
   float dynamic_target_fps = sl::INVALID_FLOAT;
   bool valid = false;
@@ -359,6 +363,9 @@ inline bool SameOptions(const OptionsSummary& previous,
          previous.mode == current.mode &&
          previous.generated_frames == current.generated_frames &&
          previous.flags == current.flags &&
+         previous.dynamic_width == current.dynamic_width &&
+         previous.dynamic_height == current.dynamic_height &&
+         previous.back_buffers == current.back_buffers &&
          previous.mvec_depth_width == current.mvec_depth_width &&
          previous.mvec_depth_height == current.mvec_depth_height &&
          previous.color_width == current.color_width &&
@@ -368,6 +375,7 @@ inline bool SameOptions(const OptionsSummary& previous,
          previous.depth_format == current.depth_format &&
          previous.hudless_format == current.hudless_format &&
          previous.ui_format == current.ui_format &&
+         previous.queue_parallelism_mode == current.queue_parallelism_mode &&
          previous.ui_recomposition == current.ui_recomposition &&
          previous.dynamic_target_fps == current.dynamic_target_fps;
 }
@@ -403,6 +411,9 @@ inline void ObserveOptions(uint32_t viewport, const sl::DLSSGOptions& values,
   current.mode = static_cast<uint32_t>(values.mode);
   current.generated_frames = values.numFramesToGenerate;
   current.flags = static_cast<uint32_t>(values.flags);
+  current.dynamic_width = values.dynamicResWidth;
+  current.dynamic_height = values.dynamicResHeight;
+  current.back_buffers = values.numBackBuffers;
   current.mvec_depth_width = values.mvecDepthWidth;
   current.mvec_depth_height = values.mvecDepthHeight;
   current.color_width = values.colorWidth;
@@ -412,6 +423,9 @@ inline void ObserveOptions(uint32_t viewport, const sl::DLSSGOptions& values,
   current.depth_format = values.depthBufferFormat;
   current.hudless_format = values.hudLessBufferFormat;
   current.ui_format = values.uiBufferFormat;
+  if (values.structVersion >= sl::kStructVersion3)
+    current.queue_parallelism_mode =
+        static_cast<uint32_t>(values.queueParallelismMode);
   if (values.structVersion >= sl::kStructVersion4)
     current.ui_recomposition = static_cast<int>(values.enableUserInterfaceRecomposition);
   if (values.structVersion >= sl::kStructVersion5)

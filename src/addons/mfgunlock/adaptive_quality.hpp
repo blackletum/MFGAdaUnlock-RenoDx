@@ -11,7 +11,7 @@
 namespace mfgunlock::adaptivequality {
 
 inline constexpr const char* kCandidateArbitration = R"PTX(
-// MFGUNLOCK_CANDIDATE_ARBITRATION_V1
+// MFGUNLOCK_CANDIDATE_ARBITRATION_V2
 // qf9 is the already-computed RGB disagreement between the two valid warps.
 // Reuse the validated-warp agreement interval: no arbitration below 0.05,
 // full disagreement evidence at 0.15. qv3 requires both candidates to be valid.
@@ -32,11 +32,14 @@ mul.f32 %qf2, %qf2, %qf4;
 // provider's original weights qf8/qf10. The stronger candidate is untouched.
 fma.rn.f32 %qf4, %qf2, 0fBF400000, 0f3F800000;
 setp.ge.f32 %qv2, %qf3, 0f00000000;
-sub.f32 %qf2, %qf1, %qf10;
-fma.rn.f32 %qf2, %qf4, %qf2, %qf10;
+// Select the weaker candidate and its native anchor first. This preserves the
+// V1 curve while avoiding two parallel delta/FMA paths and shortening live
+// temporary ranges in the provider kernel.
+selp.f32 %qf2, %qf1, %qf0, %qv2;
+selp.f32 %qf3, %qf10, %qf8, %qv2;
+sub.f32 %qf2, %qf2, %qf3;
+fma.rn.f32 %qf2, %qf4, %qf2, %qf3;
 @%qv2 mov.f32 %qf1, %qf2;
-sub.f32 %qf2, %qf0, %qf8;
-fma.rn.f32 %qf2, %qf4, %qf2, %qf8;
 @!%qv2 mov.f32 %qf0, %qf2;
 )PTX";
 

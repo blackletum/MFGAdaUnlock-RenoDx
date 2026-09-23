@@ -131,7 +131,9 @@ def main():
     adaptive_header = (ROOT / 'src/addons/mfgunlock/adaptive_quality.hpp').read_text()
     adaptive_fragment = adaptive_header.split('R"PTX(', 1)[1].split(')PTX"', 1)[0]
     assert adaptive_fragment in adaptive_blend
-    assert adaptive_blend.count('MFGUNLOCK_CANDIDATE_ARBITRATION_V1') == 1
+    assert adaptive_blend.count('MFGUNLOCK_CANDIDATE_ARBITRATION_V2') == 1
+    assert adaptive_blend.count('selp.f32 %qf2, %qf1, %qf0, %qv2;') == 1
+    assert adaptive_blend.count('selp.f32 %qf3, %qf10, %qf8, %qv2;') == 1
     inpaint = ('setp.gt.ftz.f32 %p6, %f39, 0f00000000;\n'
                'setp.gt.ftz.f32 %p13, %f43, 0f00000000;\n')
     inpaint = builder.patch_adaptive_inpaint_decision_v1(inpaint)
