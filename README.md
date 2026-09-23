@@ -180,7 +180,8 @@ through [my Ko-fi](https://ko-fi.com/mavismmg).
 | Dying Light: The Beast | Working |
 | Onimusha: Way of the Sword | Working |
 | Monster Hunter Wilds | Working |
-| Star Wars Outlaws | Soon |
+| Star Wars Outlaws | Working — Dynamic MFG not supported |
+| The Sinking City 2 | Working |
 
 These are the games personally tested with this fork; this is not a claim of
 universal compatibility. Results may vary with the game version, DLSS and
