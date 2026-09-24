@@ -179,7 +179,7 @@ through [my Ko-fi](https://ko-fi.com/mavismmg).
 | Mafia: The Old Country | Working with HDR fix |
 | Dying Light: The Beast | Working |
 | Onimusha: Way of the Sword | Working |
-| Monster Hunter Wilds | Working |
+| [Monster Hunter Wilds](#monster-hunter-wilds-first-launch-note) | Working |
 | Star Wars Outlaws | Working — Dynamic MFG not supported |
 | The Sinking City 2 | Working |
 
@@ -190,6 +190,20 @@ Streamline versions, GPU, drivers, and configuration.
 **Working with HDR fix** means selecting **Automatic Guard + UI Composition
 (HDR compatibility)** if the HDR issue occurs. If that mode introduces an
 artifact on a HUD/UI element, switch back to **Native**.
+
+### Monster Hunter Wilds first-launch note
+
+After installing or updating the addon, or whenever the game rebuilds
+`shader.cache2`, allow the shader compilation to finish completely. Then fully
+close **Monster Hunter Wilds** and launch it again before evaluating Frame
+Generation, image quality, latency, or frame pacing.
+
+Testing during that initial compilation session, without a full game restart,
+can result in severely uneven frame pacing. Toggling Frame Generation off and
+back on in the in-game menu does not necessarily clear the affected state.
+
+Special thanks to **Darkalibur** for helping identify this first-launch issue,
+reproducing the frame-pacing behavior, and testing the restart workaround.
 
 ## Known Multiplier Behavior
 
@@ -954,6 +968,10 @@ They are developer tools and are not required for normal use.
 - Special thanks to Artur from DLSS Enabler for the valuable debugging insights
   during the investigation of the Hogwarts Legacy HDR + Frame Generation issue,
   which helped lead to the fix included in this fork.
+- Special thanks to **Darkalibur** for helping identify and validate the
+  `shader.cache2` first-launch frame-pacing issue in Monster Hunter Wilds.
+- Special thanks to **harddaysmike** for the Star Wars Outlaws compatibility
+  and regression testing.
 - [u/amart565](https://www.reddit.com/user/amart565/) tested and documented the
   ReShade + MFG Unlock installation workflow for Xbox Game Pass / UWP-style game packages,
   including Vulkan titles such as Indiana Jones and DOOM: The Dark Ages.
