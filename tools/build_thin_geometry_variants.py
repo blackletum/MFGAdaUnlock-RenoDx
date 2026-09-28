@@ -10,8 +10,9 @@ local build.
 from __future__ import annotations
 
 import argparse
-import hashlib
+import ctypes
 from pathlib import Path
+import platform
 import re
 import struct
 import subprocess
@@ -394,6 +395,51 @@ def patch_adaptive_geometry_v1(source: str) -> str:
     return source.replace(symmetric, asymmetric)
 
 
+def patch_adaptive_geometry_v2(source: str) -> str:
+    """Blend best-neighbor and second-neighbor support without new taps.
+
+    A single coherent neighbor retains the existing Aggressive relaxation;
+    two coherent neighbors converge continuously to Balanced. This preserves
+    one-pixel detail while making isolated support less likely to switch the
+    full Balanced relaxation on and off between frames.
+    """
+    source = patch_adaptive_geometry_v1(source)
+    source = replace_once(
+        source,
+        "// MFGUNLOCK_ASYMMETRIC_DISOCCLUSION_V1\n",
+        "// MFGUNLOCK_ASYMMETRIC_DISOCCLUSION_V2\n"
+        "// MFGUNLOCK_TWO_NEIGHBOR_CONFIDENCE_V2\n",
+        "adaptive geometry V2 marker",
+    )
+    if source.count("mov.f32 %qgf0, 0f00000000;\n") != 2:
+        raise ValueError("adaptive geometry V2: support initializers changed")
+    source = source.replace(
+        "mov.f32 %qgf0, 0f00000000;\n",
+        "mov.f32 %qgf0, 0f00000000;\n"
+        "mov.f32 %qgf1, 0f00000000;\n",
+    )
+    best_update = "max.f32 %qgf0, %qgf0, %qgf6;\n"
+    if source.count(best_update) != 8:
+        raise ValueError("adaptive geometry V2: best-support anchors changed")
+    source = source.replace(
+        best_update,
+        "min.f32 %qgf8, %qgf0, %qgf6;\n"
+        "max.f32 %qgf1, %qgf1, %qgf8;\n" + best_update,
+    )
+    final = "fma.rn.f32 %qgf11, %qgf0, 0fBF000000, 0f3F800000;\n"
+    if source.count(final) != 2:
+        raise ValueError("adaptive geometry V2: final relaxation anchors changed")
+    consensus = (
+        "fma.rn.f32 %qgf6, %qgf1, 0fC0000000, 0f40400000;\n"
+        "mul.f32 %qgf1, %qgf1, %qgf1;\n"
+        "mul.f32 %qgf1, %qgf1, %qgf6;\n"
+        "fma.rn.f32 %qgf6, %qgf1, 0f3E800000, 0f3E800000;\n"
+        "mul.f32 %qgf0, %qgf0, %qgf6;\n"
+        "sub.f32 %qgf11, 0f3F800000, %qgf0;\n"
+    )
+    return source.replace(final, consensus)
+
+
 def patch_adaptive_inpaint_decision_v1(source: str) -> str:
     """Fail closed when the provider's inpaint-need mask is unordered.
 
@@ -413,6 +459,26 @@ def patch_adaptive_inpaint_decision_v1(source: str) -> str:
             anchor.replace("setp.gt.", "setp.gtu."),
             f"inpaint decision mask {index}",
         )
+    return source
+
+
+def patch_adaptive_inpaint_decision_v2(source: str) -> str:
+    """Preserve every finite V1 decision and fail closed for all non-finites."""
+    anchors = (
+        ("%p6", "%p5", "%f39", "%f40"),
+        ("%p13", "%p12", "%f43", "%f44"),
+    )
+    for index, (result, scratch_pred, value, scratch_value) in enumerate(anchors):
+        anchor = f"setp.gt.ftz.f32 {result}, {value}, 0f00000000;\n"
+        program = (
+            ("// MFGUNLOCK_INPAINT_DECISION_NONFINITE_V2\n" if index == 0 else "")
+            + f"abs.f32 {scratch_value}, {value};\n"
+            + f"setp.geu.f32 {scratch_pred}, {scratch_value}, 0f7F800000;\n"
+            + anchor
+            + f"or.pred {result}, {result}, {scratch_pred};\n"
+        )
+        source = replace_once(source, anchor, program,
+                              f"inpaint V2 decision mask {index}")
     return source
 
 
@@ -550,6 +616,48 @@ def patch_adaptive_blend(source: str) -> str:
                         "candidate arbitration")
 
 
+def _fragment(name: str, symbol_index: int = 0) -> str:
+    header = Path(__file__).resolve().parents[1] / "src/addons/mfgunlock" / name
+    parts = header.read_text(encoding="utf-8").split('R"PTX(')[1:]
+    return parts[symbol_index].split(')PTX"', 1)[0]
+
+
+def patch_adaptive_blend_v2(source: str) -> str:
+    source = patch_validated_warp_blend(source)
+    semantic_gates = (
+        "add.f32 %qf10, %qf9, 0f3DA3D70A;\n"
+        "setp.lt.f32 %qv4, %qf10, %qf6;\n"
+        "setp.lt.f32 %qv2, %qf9, 0f3E19999A;\n"
+        "and.pred %qv4, %qv4, %qv2;\n"
+        "and.pred %qv4, %qv4, %qv3;\n"
+        "setp.gt.f32 %qv2, %qf6, 0f3E800000;\n"
+        "setp.ge.f32 %qv5, %f148, 0f3E4CCCCD;\n"
+        "and.pred %qv5, %qv5, %qv2;\n"
+        "or.pred %qv5, %qv5, %qv4;\n"
+        "and.pred %qv0, %qv0, %qv5;\n"
+        "setp.ge.f32 %qv6, %f149, 0f3E4CCCCD;\n"
+        "and.pred %qv6, %qv6, %qv2;\n"
+        "or.pred %qv6, %qv6, %qv4;\n"
+        "and.pred %qv1, %qv1, %qv6;\n"
+    )
+    source = replace_once(source, semantic_gates,
+                          "// MFGUNLOCK_SOFT_ELIGIBILITY_V2\n",
+                          "soft warp eligibility V2")
+    source = replace_once(source, "// MFGUNLOCK_VALIDATED_WARP_BLEND_V1\n",
+                          "// MFGUNLOCK_VALIDATED_WARP_BLEND_V2\n",
+                          "validated warp V2 marker")
+    smooth, border, arbitration = (
+        _fragment("adaptive_quality_v2.hpp", index) for index in range(3)
+    )
+    anchor = "min.f32 %qf1, %qf1, 0f3F800000;\n"
+    source = replace_once(source, anchor, anchor + smooth,
+                          "smooth warp confidence V2")
+    source = replace_once(source, smooth, smooth + border,
+                          "border confidence V2")
+    return replace_once(source, border, border + arbitration,
+                        "candidate arbitration V2")
+
+
 PATCHERS = {
     "Kernel_EstimatePrev2CurrScatter": ("previous_scatter", patch_previous_scatter, ADA_ARCH),
     "Kernel_EstimateIntermMvecsScatter": ("intermediate_scatter", patch_intermediate_scatter, BLACKWELL_ARCH),
@@ -562,19 +670,112 @@ EXTRA_PATCHERS = {
         ("validated_warp_blend_refined", patch_refined_blend),
         ("validated_warp_blend_refined_border", patch_refined_border_blend),
         ("adaptive_quality_blend_v1", patch_adaptive_blend),
+        ("adaptive_quality_blend_v2", patch_adaptive_blend_v2),
     ],
     "Kernel_EstimateIntermMvecsScatter": [
         ("adaptive_quality_geometry_v1", patch_adaptive_geometry_v1),
+        ("adaptive_quality_geometry_v2", patch_adaptive_geometry_v2),
         ("geometry_support_smooth_v2", patch_geometry_confidence_v2),
         ("geometry_motion_depth_refined", patch_refined_geometry),
         ("geometry_motion_depth", patch_silhouette_boundary_guard),
         ("geometry_motion_depth_aggressive",
          patch_silhouette_boundary_guard_aggressive),
     ],
+    "Kernel_OutputPull": [
+        ("adaptive_inpaint_decision_v2", patch_adaptive_inpaint_decision_v2),
+    ],
 }
 
 
-def compile_ptx(ptxas: Path, source: str, directory: Path, name: str) -> bytes:
+class CudaDriverCompiler:
+    """Compile PTX with the installed NVIDIA driver when ptxas is absent."""
+
+    def __init__(self) -> None:
+        if platform.system() != "Windows":
+            raise RuntimeError("CUDA driver JIT currently requires Windows")
+        self.cuda = ctypes.WinDLL("nvcuda.dll")
+        self.cuda.cuInit.argtypes = [ctypes.c_uint]
+        self.cuda.cuDeviceGet.argtypes = [ctypes.POINTER(ctypes.c_int), ctypes.c_int]
+        self.cuda.cuCtxCreate_v2.argtypes = [
+            ctypes.POINTER(ctypes.c_void_p), ctypes.c_uint, ctypes.c_int
+        ]
+        self.cuda.cuCtxDestroy_v2.argtypes = [ctypes.c_void_p]
+        self.cuda.cuGetErrorString.argtypes = [
+            ctypes.c_int, ctypes.POINTER(ctypes.c_char_p)
+        ]
+        self.cuda.cuLinkCreate_v2.argtypes = [
+            ctypes.c_uint, ctypes.POINTER(ctypes.c_int),
+            ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(ctypes.c_void_p),
+        ]
+        self.cuda.cuLinkAddData_v2.argtypes = [
+            ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_size_t,
+            ctypes.c_char_p, ctypes.c_uint, ctypes.POINTER(ctypes.c_int),
+            ctypes.POINTER(ctypes.c_void_p),
+        ]
+        self.cuda.cuLinkComplete.argtypes = [
+            ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p),
+            ctypes.POINTER(ctypes.c_size_t),
+        ]
+        self.cuda.cuLinkDestroy.argtypes = [ctypes.c_void_p]
+        self._check(self.cuda.cuInit(0), "cuInit")
+        device = ctypes.c_int()
+        self._check(self.cuda.cuDeviceGet(ctypes.byref(device), 0), "cuDeviceGet")
+        self.context = ctypes.c_void_p()
+        self._check(
+            self.cuda.cuCtxCreate_v2(ctypes.byref(self.context), 0, device),
+            "cuCtxCreate_v2",
+        )
+
+    def _check(self, result: int, operation: str) -> None:
+        if result == 0:
+            return
+        message = ctypes.c_char_p()
+        self.cuda.cuGetErrorString(result, ctypes.byref(message))
+        detail = message.value.decode(errors="replace") if message.value else str(result)
+        raise RuntimeError(f"{operation} failed: {detail}")
+
+    def compile(self, source: str, name: str) -> bytes:
+        state = ctypes.c_void_p()
+        self._check(
+            self.cuda.cuLinkCreate_v2(0, None, None, ctypes.byref(state)),
+            "cuLinkCreate_v2",
+        )
+        try:
+            encoded = ctypes.create_string_buffer(source.encode("ascii"))
+            self._check(
+                self.cuda.cuLinkAddData_v2(
+                    state, 1, ctypes.cast(encoded, ctypes.c_void_p),
+                    len(encoded), f"{name}.ptx".encode("ascii"), 0, None, None,
+                ),
+                f"cuLinkAddData_v2({name})",
+            )
+            pointer = ctypes.c_void_p()
+            size = ctypes.c_size_t()
+            self._check(
+                self.cuda.cuLinkComplete(
+                    state, ctypes.byref(pointer), ctypes.byref(size)
+                ),
+                f"cuLinkComplete({name})",
+            )
+            return ctypes.string_at(pointer, size.value)
+        finally:
+            self.cuda.cuLinkDestroy(state)
+
+    def close(self) -> None:
+        if self.context:
+            self.cuda.cuCtxDestroy_v2(self.context)
+            self.context = ctypes.c_void_p()
+
+
+def compile_ptx(ptxas: Path | None, driver: CudaDriverCompiler | None,
+                source: str, directory: Path, name: str) -> bytes:
+    if driver is not None:
+        cubin = driver.compile(source, name)
+        print(f"  driver JIT ELF text/shared/registers [{name}]: "
+              f"{fingerprint_elf(cubin)}")
+        return cubin
+    if ptxas is None:
+        raise ValueError("no PTX compiler selected")
     source_path = directory / f"{name}.ptx"
     cubin_path = directory / f"{name}.cubin"
     source_path.write_text(source, encoding="ascii", newline="\n")
@@ -653,70 +854,146 @@ def emit_header(records: list[dict], output: Path, providers: list[Path]) -> Non
     output.write_text("\n".join(lines), encoding="ascii", newline="\n")
 
 
+def load_generated_records(path: Path) -> list[dict]:
+    """Load an existing generated table so released V1 cubins stay byte-exact."""
+    text = path.read_text(encoding="ascii")
+    arrays = {
+        match.group("name"): bytes(
+            int(value, 16)
+            for value in re.findall(r"0x([0-9a-fA-F]{2})", match.group("body"))
+        )
+        for match in re.finditer(
+            r"static const unsigned char (?P<name>kThinGeometryCubin\d+)\[\] = \{"
+            r"(?P<body>.*?)\n\};",
+            text,
+            re.DOTALL,
+        )
+    }
+    table = re.compile(
+        r"\{(?P<text>\d+)u,\s*(?P<shared>\d+)u,\s*(?P<regs>\d+)u,\s*"
+        r"(?P<slot>\d+)u,\s*0x(?P<hash>[0-9a-fA-F]+)ull,\s*"
+        r"sizeof\((?P<array>kThinGeometryCubin\d+)\),\s*(?P=array),\s*"
+        r'"(?P<mechanism>[^"]+)"\}'
+    )
+    records = []
+    for match in table.finditer(text):
+        name = match.group("array")
+        if name not in arrays:
+            raise ValueError(f"existing generated header is missing {name}")
+        records.append({
+            "mechanism": match.group("mechanism"),
+            "source_fingerprint": (
+                int(match.group("text")),
+                int(match.group("shared")),
+                int(match.group("regs")),
+            ),
+            "slot_size": int(match.group("slot")),
+            "source_hash": int(match.group("hash"), 16),
+            "replacement": arrays[name],
+        })
+    if not records:
+        raise ValueError("existing generated header contains no cubin records")
+    return records
+
+
+def record_key(record: dict) -> tuple:
+    return (
+        record["mechanism"], record["source_fingerprint"],
+        record["slot_size"], record["source_hash"],
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("provider", nargs="+", type=Path)
-    parser.add_argument("--ptxas", required=True, type=Path)
+    compiler = parser.add_mutually_exclusive_group(required=True)
+    compiler.add_argument("--ptxas", type=Path)
+    compiler.add_argument("--driver-jit", action="store_true")
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument(
+        "--preserve-existing", action="store_true",
+        help="keep every existing cubin byte-exact and append only new variants",
+    )
     parser.add_argument("--inspect", action="store_true")
     args = parser.parse_args()
 
+    existing = []
+    if args.preserve_existing:
+        if not args.output.exists():
+            raise ValueError("--preserve-existing requires an existing output header")
+        existing = load_generated_records(args.output)
     records = []
     seen = set()
-    with tempfile.TemporaryDirectory(prefix="mfg-thin-geometry-") as temp:
-        directory = Path(temp)
-        for provider in args.provider:
-            print(f"provider: {provider}")
-            for name, sources, ada_cubin in extract_kernels(provider):
-                if name not in PATCHERS:
-                    continue
-                mechanism, patcher, source_arch = PATCHERS[name]
-                if source_arch not in sources:
-                    raise ValueError(f"{name}: missing sm_{source_arch} PTX")
-                source = sources[source_arch]
-                if args.inspect:
-                    print(f"  {name}: sm_{source_arch}, {len(source)} PTX bytes")
-                    if name != "Kernel_BlendCandidatesFused":
-                        for line_number, line in enumerate(source.splitlines(), 1):
-                            if "+60]" in line or "+120]" in line:
-                                print(f"    {line_number:04d}: {line}")
-                baseline_source = source.replace(".target sm_120", ".target sm_89")
-                baseline = (
-                    ada_cubin
-                    if source_arch == ADA_ARCH
-                    else compile_ptx(args.ptxas, baseline_source, directory, mechanism + "_baseline")
-                )
-                variants = [(mechanism, patcher)]
-                variants.extend(EXTRA_PATCHERS.get(name, []))
-                for variant_name, variant_patcher in variants:
-                    patched_source = variant_patcher(baseline_source)
-                    replacement = compile_ptx(
-                        args.ptxas, patched_source, directory, variant_name)
-                    if len(baseline) > len(ada_cubin):
-                        print(f"  skip {variant_name}: baseline {len(baseline)} > slot {len(ada_cubin)}")
+    driver = CudaDriverCompiler() if args.driver_jit else None
+    try:
+        with tempfile.TemporaryDirectory(prefix="mfg-thin-geometry-") as temp:
+            directory = Path(temp)
+            for provider in args.provider:
+                print(f"provider: {provider}")
+                for name, sources, ada_cubin in extract_kernels(provider):
+                    if name not in PATCHERS:
                         continue
-                    if len(replacement) > len(ada_cubin):
-                        print(f"  skip {variant_name}: replacement {len(replacement)} > slot {len(ada_cubin)}")
-                        continue
-                    key = (variant_name, fingerprint_elf(ada_cubin), len(ada_cubin), fnv1a64(ada_cubin))
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    record = {
-                        "mechanism": variant_name,
-                        "source_fingerprint": fingerprint_elf(ada_cubin),
-                        "slot_size": len(ada_cubin),
-                        "source_hash": fnv1a64(ada_cubin),
-                        "replacement": replacement,
-                    }
-                    records.append(record)
-                    print(
-                        f"  ok {variant_name}: fp={record['source_fingerprint']} "
-                        f"slot={len(ada_cubin)} replacement={len(replacement)} "
-                        f"source-fnv={record['source_hash']:016x}"
+                    mechanism, patcher, source_arch = PATCHERS[name]
+                    if source_arch not in sources:
+                        raise ValueError(f"{name}: missing sm_{source_arch} PTX")
+                    source = sources[source_arch]
+                    if args.inspect:
+                        print(f"  {name}: sm_{source_arch}, {len(source)} PTX bytes")
+                        if name != "Kernel_BlendCandidatesFused":
+                            for line_number, line in enumerate(source.splitlines(), 1):
+                                if "+60]" in line or "+120]" in line:
+                                    print(f"    {line_number:04d}: {line}")
+                    baseline_source = source.replace(".target sm_120", ".target sm_89")
+                    baseline = (
+                        ada_cubin
+                        if source_arch == ADA_ARCH
+                        else compile_ptx(args.ptxas, driver, baseline_source,
+                                         directory, mechanism + "_baseline")
                     )
+                    variants = [(mechanism, patcher)]
+                    variants.extend(EXTRA_PATCHERS.get(name, []))
+                    for variant_name, variant_patcher in variants:
+                        patched_source = variant_patcher(baseline_source)
+                        replacement = compile_ptx(
+                            args.ptxas, driver, patched_source, directory,
+                            variant_name)
+                        if len(baseline) > len(ada_cubin):
+                            print(f"  skip {variant_name}: baseline {len(baseline)} > slot {len(ada_cubin)}")
+                            continue
+                        if len(replacement) > len(ada_cubin):
+                            print(f"  skip {variant_name}: replacement {len(replacement)} > slot {len(ada_cubin)}")
+                            continue
+                        key = (variant_name, fingerprint_elf(ada_cubin), len(ada_cubin), fnv1a64(ada_cubin))
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        record = {
+                            "mechanism": variant_name,
+                            "source_fingerprint": fingerprint_elf(ada_cubin),
+                            "slot_size": len(ada_cubin),
+                            "source_hash": fnv1a64(ada_cubin),
+                            "replacement": replacement,
+                        }
+                        records.append(record)
+                        print(
+                            f"  ok {variant_name}: fp={record['source_fingerprint']} "
+                            f"slot={len(ada_cubin)} replacement={len(replacement)} "
+                            f"source-fnv={record['source_hash']:016x}"
+                        )
+    finally:
+        if driver is not None:
+            driver.close()
     if not records:
         raise SystemExit("no supported experimental variants were generated")
+    if existing:
+        existing_keys = {record_key(record) for record in existing}
+        additions = [
+            record for record in records
+            if record_key(record) not in existing_keys
+        ]
+        records = existing + additions
+        print(f"preserved {len(existing)} existing variants byte-exact; "
+              f"appended {len(additions)} new variants")
     emit_header(records, args.output, args.provider)
     print(f"wrote {args.output} ({len(records)} variants)")
 

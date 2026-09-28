@@ -150,6 +150,12 @@ std::atomic_bool g_configured_quality_refinement{false};
 // saved opt-out from existing users.
 std::atomic_bool g_adaptive_quality{true};
 std::atomic_bool g_configured_adaptive_quality{true};
+std::atomic<unsigned int> g_adaptive_quality_profile{
+    static_cast<unsigned int>(
+        mfgunlock::adaptivequality::Profile::kStableV1)};
+std::atomic<unsigned int> g_configured_adaptive_quality_profile{
+    static_cast<unsigned int>(
+        mfgunlock::adaptivequality::Profile::kStableV1)};
 // Research-only attenuation of the refinement's extra blend weight near the
 // screen boundary. Never changes the provider's native candidate weight.
 std::atomic_bool g_border_confidence{false};
@@ -844,7 +850,15 @@ mfgunlock::blackwell::Result AggregateBlackwellResults(
     result.geometry_confidence_v2 |= module.result.geometry_confidence_v2;
     result.adaptive_quality_requested |= module.result.adaptive_quality_requested;
     result.adaptive_geometry |= module.result.adaptive_geometry;
+    result.adaptive_geometry_version =
+        mfgunlock::adaptivequality::MergeComponentVersions(
+            result.adaptive_geometry_version,
+            module.result.adaptive_geometry_version);
     result.adaptive_inpaint_decision |= module.result.adaptive_inpaint_decision;
+    result.adaptive_inpaint_version =
+        mfgunlock::adaptivequality::MergeComponentVersions(
+            result.adaptive_inpaint_version,
+            module.result.adaptive_inpaint_version);
     result.adaptive_directional_scatter |= module.result.adaptive_directional_scatter;
     result.adaptive_fallback |= module.result.adaptive_fallback;
     result.kernels += module.result.kernels;
@@ -2523,6 +2537,33 @@ void StatusRow(const char* label, const char* value, const ImVec4& color) {
   ImGui::TextColored(color, "%s", value);
 }
 
+std::string AdaptiveComponentStatus(
+    mfgunlock::adaptivequality::Profile requested,
+    mfgunlock::adaptivequality::ComponentVersion actual, bool applied) {
+  using Version = mfgunlock::adaptivequality::ComponentVersion;
+  if (!applied || actual == Version::kNative) return "Native / not applied";
+  if (actual == Version::kMixed)
+    return "Mixed versions across providers; execution unverified";
+  if (actual == Version::kV2)
+    return "V2 applied; execution unverified";
+  return requested == mfgunlock::adaptivequality::Profile::kFlickerReducedV2
+             ? "V1 fallback; execution unverified"
+             : "V1 applied; execution unverified";
+}
+
+const ImVec4& AdaptiveComponentColor(
+    mfgunlock::adaptivequality::Profile requested,
+    mfgunlock::adaptivequality::ComponentVersion actual, bool applied) {
+  using Version = mfgunlock::adaptivequality::ComponentVersion;
+  if (!applied || actual == Version::kNative || actual == Version::kMixed)
+    return kUiWarning;
+  if (requested ==
+          mfgunlock::adaptivequality::Profile::kFlickerReducedV2 &&
+      actual != Version::kV2)
+    return kUiWarning;
+  return kUiPositive;
+}
+
 const char* InputFormatApiName(uint32_t api) {
   switch (api) {
     case 1: return "DXGI";
@@ -3718,7 +3759,8 @@ void DrawLegacyOverlay(reshade::api::effect_runtime* /*runtime*/) {
   if (mfgunlock::framecount::g_quality_viewport_capacity_exhausted.load(
           std::memory_order_relaxed)) {
     ImGui::TextDisabled(
-        "More than eight Streamline viewports were seen; extra viewports use conservative fallback.");
+        "More than %zu Streamline viewports were seen; extra viewports use conservative fallback.",
+        mfgunlock::framecount::kMaxQualityViewports);
   }
   const auto reset_count = mfgunlock::framecount::g_quality_resets_injected.load(
       std::memory_order_relaxed);
@@ -4369,6 +4411,9 @@ void OnRegisterOverlay(reshade::api::effect_runtime* runtime) {
           g_blackwell_framework_kernels.load(std::memory_order_relaxed) ||
       g_configured_adaptive_quality.load(std::memory_order_relaxed) !=
           g_adaptive_quality.load(std::memory_order_relaxed) ||
+      g_configured_adaptive_quality_profile.load(
+          std::memory_order_relaxed) !=
+          g_adaptive_quality_profile.load(std::memory_order_relaxed) ||
       g_configured_quality_refinement.load(std::memory_order_relaxed) !=
           g_quality_refinement.load(std::memory_order_relaxed) ||
       g_configured_geometry_confidence_v2.load(std::memory_order_relaxed) !=
@@ -5240,6 +5285,39 @@ void OnRegisterOverlay(reshade::api::effect_runtime* runtime) {
   }
 
   if (ImGui::CollapsingHeader("Advanced")) {
+    if (g_configured_adaptive_quality.load(std::memory_order_relaxed)) {
+      constexpr const char* kAdaptiveProfiles[] = {
+          "Stable V1 (Recommended)",
+          "Flicker-Reduced V2 (Experimental)"};
+      int adaptive_profile = static_cast<int>(
+          mfgunlock::adaptivequality::NormalizeProfile(
+              g_configured_adaptive_quality_profile.load(
+                  std::memory_order_relaxed))) - 1;
+      ImGui::SetNextItemWidth(-1.0f);
+      if (ImGui::Combo("Adaptive Quality profile", &adaptive_profile,
+                       kAdaptiveProfiles,
+                       static_cast<int>(std::size(kAdaptiveProfiles)))) {
+        const auto selected = adaptive_profile == 1
+                                  ? mfgunlock::adaptivequality::Profile::
+                                        kFlickerReducedV2
+                                  : mfgunlock::adaptivequality::Profile::
+                                        kStableV1;
+        g_configured_adaptive_quality_profile.store(
+            static_cast<unsigned int>(selected),
+            std::memory_order_relaxed);
+        reshade::set_config_value(
+            nullptr, kConfigSection, "AdaptiveQualityProfile",
+            static_cast<int>(selected));
+      }
+      HelpMarker(
+          "Stable V1 preserves the released 1.1.5 quality path. Flicker-Reduced V2 uses continuous frame-local confidence for warp, geometry and inpaint without history or new resource reads. Each component falls back independently to V1 and then the native provider when its exact kernel is unavailable. Requires restart.");
+      if (g_configured_adaptive_quality_profile.load(
+              std::memory_order_relaxed) !=
+          g_adaptive_quality_profile.load(std::memory_order_relaxed)) {
+        ImGui::TextDisabled("Saved for next launch; restart the game.");
+      }
+      ImGui::Spacing();
+    }
     constexpr const char* kRuntimeModes[] = {
         "Game default", "Prefer local runtime - disable OTA",
         "Force NVIDIA OTA runtime"};
@@ -5472,34 +5550,61 @@ void OnRegisterOverlay(reshade::api::effect_runtime* runtime) {
                 thin_geometry_patched ? "At least one active" : "Pending",
                 thin_geometry_patched ? kUiPositive : kUiWarning);
       if (g_adaptive_quality.load(std::memory_order_relaxed)) {
+        const auto requested_profile =
+            mfgunlock::adaptivequality::NormalizeProfile(
+                g_adaptive_quality_profile.load(std::memory_order_relaxed));
         const bool adaptive_blend =
             thin_geometry_last.result.validated_warp_blend.applied;
         const bool adaptive_complete =
             blackwell_active_result.adaptive_geometry && adaptive_blend &&
             blackwell_active_result.adaptive_inpaint_decision;
+        const auto warp_version =
+            thin_geometry_last.result.validated_warp_blend.adaptive_version;
+        const auto geometry_version =
+            blackwell_active_result.adaptive_geometry_version;
+        const auto inpaint_version =
+            blackwell_active_result.adaptive_inpaint_version;
+        const bool requested_v2 =
+            requested_profile ==
+            mfgunlock::adaptivequality::Profile::kFlickerReducedV2;
+        const bool all_requested_versions =
+            !requested_v2 ||
+            (warp_version ==
+                 mfgunlock::adaptivequality::ComponentVersion::kV2 &&
+             geometry_version ==
+                 mfgunlock::adaptivequality::ComponentVersion::kV2 &&
+             inpaint_version ==
+                 mfgunlock::adaptivequality::ComponentVersion::kV2);
+        const std::string profile_status =
+            std::string(mfgunlock::adaptivequality::ProfileName(
+                requested_profile)) +
+            (adaptive_complete && all_requested_versions
+                 ? "; core components applied"
+                 : "; partial/fallback");
         StatusRow("Adaptive Quality Suite",
-                  adaptive_complete
-                      ? "Core components applied; execution unverified"
-                      : "Partial/fallback; check component rows",
-                  adaptive_complete ? kUiPositive : kUiWarning);
-        StatusRow("Asymmetric disocclusion",
-                  blackwell_active_result.adaptive_geometry
-                      ? "Applied"
-                      : "Fallback/not applied",
-                  blackwell_active_result.adaptive_geometry
+                  profile_status.c_str(),
+                  adaptive_complete && all_requested_versions
                       ? kUiPositive
                       : kUiWarning);
-        StatusRow("Candidate arbitration",
-                  adaptive_blend ? "Applied in Validated Warp Blend"
-                                 : "Fallback/not applied",
-                  adaptive_blend ? kUiPositive : kUiWarning);
-        StatusRow("Inpaint decision refinement",
-                  blackwell_active_result.adaptive_inpaint_decision
-                      ? "Applied (non-finite mask safety)"
-                      : "Baseline Blackwell decision",
-                  blackwell_active_result.adaptive_inpaint_decision
-                      ? kUiPositive
-                      : kUiMuted);
+        const std::string warp_status = AdaptiveComponentStatus(
+            requested_profile, warp_version, adaptive_blend);
+        StatusRow("Warp confidence", warp_status.c_str(),
+                  AdaptiveComponentColor(requested_profile, warp_version,
+                                         adaptive_blend));
+        const std::string geometry_status = AdaptiveComponentStatus(
+            requested_profile, geometry_version,
+            blackwell_active_result.adaptive_geometry);
+        StatusRow("Geometry confidence", geometry_status.c_str(),
+                  AdaptiveComponentColor(
+                      requested_profile, geometry_version,
+                      blackwell_active_result.adaptive_geometry));
+        const std::string inpaint_status = AdaptiveComponentStatus(
+            requested_profile, inpaint_version,
+            blackwell_active_result.adaptive_inpaint_decision);
+        StatusRow("Inpaint decision", inpaint_status.c_str(),
+                  AdaptiveComponentColor(
+                      requested_profile, inpaint_version,
+                      blackwell_active_result.adaptive_inpaint_decision));
         StatusRow("Directional scatter",
                   blackwell_active_result.adaptive_directional_scatter
                       ? "Native motion-adaptive coverage retained"
@@ -5615,6 +5720,19 @@ void OnRegisterOverlay(reshade::api::effect_runtime* runtime) {
         intermediate_report = "Requested; not applied";
       }
     }
+    const auto adaptive_profile =
+        mfgunlock::adaptivequality::NormalizeProfile(
+            g_adaptive_quality_profile.load(std::memory_order_relaxed));
+    const std::string adaptive_warp_report = AdaptiveComponentStatus(
+        adaptive_profile,
+        thin_geometry_last.result.validated_warp_blend.adaptive_version,
+        thin_geometry_last.result.validated_warp_blend.applied);
+    const std::string adaptive_geometry_report = AdaptiveComponentStatus(
+        adaptive_profile, blackwell_active_result.adaptive_geometry_version,
+        blackwell_active_result.adaptive_geometry);
+    const std::string adaptive_inpaint_report = AdaptiveComponentStatus(
+        adaptive_profile, blackwell_active_result.adaptive_inpaint_version,
+        blackwell_active_result.adaptive_inpaint_decision);
     std::ostringstream report;
     report << "MFG Unlock Diagnostics\n"
            << "Renderer: " << RenderApiName(render_api) << '\n'
@@ -5669,21 +5787,14 @@ void OnRegisterOverlay(reshade::api::effect_runtime* runtime) {
            << mfgunlock::framecount::g_latency_guard_new_frames.load(std::memory_order_relaxed) << '\n'
            << "Adaptive Quality Suite: "
            << (g_adaptive_quality.load(std::memory_order_relaxed)
-                   ? "Requested (check component status)"
+                   ? mfgunlock::adaptivequality::ProfileName(adaptive_profile)
                    : "Off") << '\n'
-           << "Asymmetric disocclusion confidence: "
-           << (blackwell_active_result.adaptive_geometry
-                   ? "Patch applied; execution unverified"
-                   : "Not applied/fallback") << '\n'
-           << "Candidate arbitration: "
-           << (g_adaptive_quality.load(std::memory_order_relaxed) &&
-                       thin_geometry_last.result.validated_warp_blend.applied
-                   ? "Patch applied; execution unverified"
-                   : "Not applied/fallback") << '\n'
+           << "Adaptive warp confidence: "
+           << adaptive_warp_report << '\n'
+           << "Adaptive geometry confidence: "
+           << adaptive_geometry_report << '\n'
            << "Adaptive inpaint decision: "
-           << (blackwell_active_result.adaptive_inpaint_decision
-                   ? "Patch applied; execution unverified"
-                   : "Baseline") << '\n'
+           << adaptive_inpaint_report << '\n'
            << "Directional scatter: "
            << (blackwell_active_result.adaptive_directional_scatter
                    ? "Provider-native signed coverage retained"
@@ -5928,6 +6039,17 @@ void LoadConfig() {
   g_configured_adaptive_quality.store(
       g_adaptive_quality.load(std::memory_order_relaxed),
       std::memory_order_relaxed);
+  if (reshade::get_config_value(nullptr, kConfigSection,
+                                "AdaptiveQualityProfile", value)) {
+    g_adaptive_quality_profile.store(
+        static_cast<unsigned int>(
+            mfgunlock::adaptivequality::NormalizeProfile(
+                static_cast<unsigned int>(value))),
+        std::memory_order_relaxed);
+  }
+  g_configured_adaptive_quality_profile.store(
+      g_adaptive_quality_profile.load(std::memory_order_relaxed),
+      std::memory_order_relaxed);
   if (reshade::get_config_value(nullptr, kConfigSection, "ExperimentalQualityRefinement", value))
     g_quality_refinement.store(value != 0, std::memory_order_relaxed);
   g_configured_quality_refinement.store(g_quality_refinement.load(std::memory_order_relaxed),
@@ -5951,6 +6073,9 @@ void LoadConfig() {
       g_quality_refinement.load(std::memory_order_relaxed);
   mfgunlock::thingeometry::g_adaptive_quality_enabled =
       adaptive_quality;
+  mfgunlock::thingeometry::g_adaptive_quality_profile =
+      mfgunlock::adaptivequality::NormalizeProfile(
+          g_adaptive_quality_profile.load(std::memory_order_relaxed));
   mfgunlock::thingeometry::g_border_confidence_enabled =
       !adaptive_quality &&
       g_quality_refinement.load(std::memory_order_relaxed) &&
@@ -5960,6 +6085,9 @@ void LoadConfig() {
       g_quality_refinement.load(std::memory_order_relaxed);
   mfgunlock::blackwell::g_adaptive_quality_enabled =
       adaptive_quality;
+  mfgunlock::blackwell::g_adaptive_quality_profile =
+      mfgunlock::adaptivequality::NormalizeProfile(
+          g_adaptive_quality_profile.load(std::memory_order_relaxed));
   mfgunlock::blackwell::g_geometry_confidence_v2_enabled =
       !adaptive_quality &&
       g_quality_refinement.load(std::memory_order_relaxed) &&

@@ -81,6 +81,8 @@ add_test(NAME blackwell_kernel_tests COMMAND blackwell_kernel_tests)
 add_executable(thin_geometry_tests thin_geometry_tests.cpp)
 target_compile_definitions(thin_geometry_tests PRIVATE NOMINMAX)
 add_test(NAME thin_geometry_tests COMMAND thin_geometry_tests)
+add_executable(adaptive_quality_v2_tests adaptive_quality_v2_tests.cpp)
+add_test(NAME adaptive_quality_v2_tests COMMAND adaptive_quality_v2_tests)
 find_program(POWERSHELL_EXECUTABLE NAMES powershell)
 if(POWERSHELL_EXECUTABLE)
   add_test(NAME capture_comparison COMMAND "${POWERSHELL_EXECUTABLE}" -NoProfile

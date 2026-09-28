@@ -8,7 +8,61 @@
  */
 #pragma once
 
+#include <cstdint>
+
 namespace mfgunlock::adaptivequality {
+
+enum class Profile : uint32_t {
+  kStableV1 = 1,
+  kFlickerReducedV2 = 2,
+};
+
+enum class ComponentVersion : uint32_t {
+  kNative = 0,
+  kV1 = 1,
+  kV2 = 2,
+  kMixed = 3,
+};
+
+inline constexpr Profile NormalizeProfile(uint32_t value) {
+  return value == static_cast<uint32_t>(Profile::kFlickerReducedV2)
+             ? Profile::kFlickerReducedV2
+             : Profile::kStableV1;
+}
+
+inline constexpr ComponentVersion SelectComponentVersion(
+    Profile requested, bool v2_available, bool v1_available) {
+  if (requested == Profile::kFlickerReducedV2 && v2_available)
+    return ComponentVersion::kV2;
+  return v1_available ? ComponentVersion::kV1
+                      : ComponentVersion::kNative;
+}
+
+inline constexpr const char* ProfileName(Profile profile) {
+  return profile == Profile::kFlickerReducedV2 ? "Flicker-Reduced V2"
+                                               : "Stable V1";
+}
+
+inline constexpr const char* ComponentVersionName(ComponentVersion version) {
+  switch (version) {
+    case ComponentVersion::kMixed:
+      return "mixed";
+    case ComponentVersion::kV2:
+      return "V2";
+    case ComponentVersion::kV1:
+      return "V1";
+    default:
+      return "native";
+  }
+}
+
+inline constexpr ComponentVersion MergeComponentVersions(
+    ComponentVersion current, ComponentVersion observed) {
+  if (current == ComponentVersion::kNative) return observed;
+  if (observed == ComponentVersion::kNative || current == observed)
+    return current;
+  return ComponentVersion::kMixed;
+}
 
 inline constexpr const char* kCandidateArbitration = R"PTX(
 // MFGUNLOCK_CANDIDATE_ARBITRATION_V2

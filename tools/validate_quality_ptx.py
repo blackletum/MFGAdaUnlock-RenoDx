@@ -6,6 +6,7 @@ import argparse
 import ctypes
 from pathlib import Path
 import platform
+import re
 import subprocess
 
 
@@ -13,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 from build_thin_geometry_variants import fingerprint_elf
 
 
-def fragment(name: str, git_ref: str | None) -> str:
+def fragments(name: str, git_ref: str | None) -> list[str]:
     if git_ref:
         text = subprocess.check_output(
             ["git", "show", f"{git_ref}:src/addons/mfgunlock/{name}"],
@@ -25,7 +26,21 @@ def fragment(name: str, git_ref: str | None) -> str:
         text = (ROOT / "src" / "addons" / "mfgunlock" / name).read_text(
             encoding="utf-8"
         )
-    return text.split('R"PTX(', 1)[1].split(')PTX"', 1)[0]
+    return re.findall(r'R"PTX\((.*?)\)PTX"', text, re.DOTALL)
+
+
+def validation_entry(name: str, body: str) -> str:
+    return f""".visible .entry {name}()
+{{
+.reg .pred %qv<7>;
+.reg .f32 %qf<12>;
+.reg .f32 %f<150>;
+.reg .b32 %r<12>;
+{body}
+st.global.f32 [MfgUnlockQualityValidationSink], %qf0;
+ret;
+}}
+"""
 
 
 def check(result: int, cuda, log: ctypes.Array[ctypes.c_char]) -> None:
@@ -51,17 +66,15 @@ def main() -> None:
 .target sm_89
 .address_size 64
 .visible .global .align 4 .f32 MfgUnlockQualityValidationSink;
-.visible .entry MfgUnlockQualityFragmentValidation()
-{
-.reg .pred %qv<7>;
-.reg .f32 %qf<12>;
-.reg .f32 %f<150>;
-.reg .b32 %r<12>;
 """
-    program += fragment("quality_refinement.hpp", args.git_ref)
-    program += fragment("quality_border.hpp", args.git_ref)
-    program += fragment("adaptive_quality.hpp", args.git_ref)
-    program += "st.global.f32 [MfgUnlockQualityValidationSink], %qf0;\nret;\n}\n"
+    v1 = (
+        fragments("quality_refinement.hpp", args.git_ref)[0]
+        + fragments("quality_border.hpp", args.git_ref)[0]
+        + fragments("adaptive_quality.hpp", args.git_ref)[0]
+    )
+    v2 = "".join(fragments("adaptive_quality_v2.hpp", args.git_ref))
+    program += validation_entry("MfgUnlockQualityV1Validation", v1)
+    program += validation_entry("MfgUnlockQualityV2Validation", v2)
 
     cuda = ctypes.WinDLL("nvcuda.dll")
     cuda.cuInit.argtypes = [ctypes.c_uint]
@@ -119,18 +132,23 @@ def main() -> None:
             len(options), options, values,
         )
         check(result, cuda, log)
-        function = ctypes.c_void_p()
-        check(
-            cuda.cuModuleGetFunction(
-                ctypes.byref(function), module,
-                b"MfgUnlockQualityFragmentValidation",
-            ),
-            cuda, log,
-        )
-        registers = ctypes.c_int()
-        # CU_FUNC_ATTRIBUTE_NUM_REGS.
-        check(cuda.cuFuncGetAttribute(ctypes.byref(registers), 4, function),
-              cuda, log)
+        register_counts = {}
+        for function_name in (
+            b"MfgUnlockQualityV1Validation",
+            b"MfgUnlockQualityV2Validation",
+        ):
+            function = ctypes.c_void_p()
+            check(
+                cuda.cuModuleGetFunction(
+                    ctypes.byref(function), module, function_name,
+                ),
+                cuda, log,
+            )
+            registers = ctypes.c_int()
+            # CU_FUNC_ATTRIBUTE_NUM_REGS.
+            check(cuda.cuFuncGetAttribute(
+                ctypes.byref(registers), 4, function), cuda, log)
+            register_counts[function_name.decode("ascii")] = registers.value
         check(cuda.cuModuleUnload(module), cuda, log)
         link_state = ctypes.c_void_p()
         check(
@@ -163,7 +181,14 @@ def main() -> None:
             cuda.cuLinkDestroy(link_state)
         source = args.git_ref or "worktree"
         print(f"quality PTX fragments ({source}) passed NVIDIA driver JIT validation")
-        print(f"synthetic fragment allocation: {registers.value} registers/thread")
+        print(
+            "synthetic V1/V2 allocation: "
+            f"{register_counts['MfgUnlockQualityV1Validation']}/"
+            f"{register_counts['MfgUnlockQualityV2Validation']} registers/thread"
+        )
+        if (register_counts["MfgUnlockQualityV2Validation"] >
+                register_counts["MfgUnlockQualityV1Validation"]):
+            raise RuntimeError("V2 synthetic fragment reduced theoretical occupancy")
         print(
             "synthetic cubin: "
             f"{text_bytes} text bytes, {shared_bytes} shared bytes, "
