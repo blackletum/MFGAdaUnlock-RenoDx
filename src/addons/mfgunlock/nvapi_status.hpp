@@ -214,14 +214,19 @@ inline GetNgxOverrideStateFn GetNgxOverrideState() {
   return function;
 }
 
-inline uint32_t QpcTicksToUs(uint64_t begin, uint64_t end) {
-  if (begin == 0 || end <= begin) return 0;
+inline uint64_t QpcFrequency() {
   static const uint64_t frequency = [] {
     LARGE_INTEGER value{};
     return QueryPerformanceFrequency(&value)
                ? static_cast<uint64_t>(value.QuadPart)
                : 0ull;
   }();
+  return frequency;
+}
+
+inline uint32_t QpcTicksToUs(uint64_t begin, uint64_t end) {
+  if (begin == 0 || end <= begin) return 0;
+  const uint64_t frequency = QpcFrequency();
   if (frequency == 0) return 0;
   const uint64_t ticks = end - begin;
   const uint64_t microseconds =
@@ -294,11 +299,10 @@ inline GuardObservation ObserveGuard(IUnknown* device, uint64_t epoch = 0) {
     result.latency_status = get_latency(device, &latency);
     if (result.latency_status == kOk) {
       thread_local latency::History history{};
-      LARGE_INTEGER frequency{}, current_counter{};
-      QueryPerformanceFrequency(&frequency);
+      LARGE_INTEGER current_counter{};
       QueryPerformanceCounter(&current_counter);
       static_cast<latency::Report<LatencyFrame>&>(result) =
-          latency::Analyze(latency.frames, static_cast<uint64_t>(frequency.QuadPart),
+          latency::Analyze(latency.frames, QpcFrequency(),
                            GetTickCount64(), reinterpret_cast<uintptr_t>(device) ^ epoch,
                            history, static_cast<uint64_t>(current_counter.QuadPart));
     }

@@ -91,6 +91,7 @@ inline std::atomic<unsigned int> g_actual_frames_presented{0};
 inline std::atomic<unsigned int> g_max_actual_frames_presented{0};
 inline std::atomic<unsigned long long> g_state_samples{0};
 inline std::atomic<unsigned int> g_seen_present_counts{0};
+inline std::atomic<uint64_t> g_output_validation_epoch{1};
 inline std::atomic_bool g_addon_enabled{true};
 // Outlaws' FG menu failed while an eager newer-ABI GetState query was active.
 // Test the native startup contract before attributing that failure to the probe.
@@ -135,6 +136,9 @@ inline std::atomic_bool g_depth_edge_override_logged{false};
 inline std::atomic<float> g_last_native_depth_separation{0.0f};
 inline std::atomic_bool g_quality_tag_batch_too_large{false};
 inline std::atomic_bool g_quality_viewport_capacity_exhausted{false};
+inline constexpr size_t kMaxQualityViewports = 32;
+inline std::atomic<unsigned int> g_quality_viewport_count{0};
+inline std::atomic<unsigned long long> g_quality_tag_lock_contentions{0};
 
 // DLSS-G 4.5/Streamline v5 can select the generated-frame count itself. The
 // provider owns its pacing, refresh-rate detection and multiplier hysteresis;
@@ -791,7 +795,8 @@ struct QualityViewportState {
   std::atomic<uint64_t> reset_requested{0};
   std::atomic<uint64_t> reset_applied{0};
 };
-inline std::array<QualityViewportState, 8> g_quality_viewports{};
+inline std::array<QualityViewportState, kMaxQualityViewports>
+    g_quality_viewports{};
 
 inline QualityViewportState* GetQualityState(const sl::ViewportHandle& viewport) {
   const uint32_t key = static_cast<uint32_t>(viewport);
@@ -800,15 +805,18 @@ inline QualityViewportState* GetQualityState(const sl::ViewportHandle& viewport)
   }
   for (auto& state : g_quality_viewports) {
     uint32_t unused = kUnusedViewport;
-    if (state.key.compare_exchange_strong(unused, key, std::memory_order_acq_rel))
+    if (state.key.compare_exchange_strong(unused, key,
+                                          std::memory_order_acq_rel)) {
+      g_quality_viewport_count.fetch_add(1, std::memory_order_relaxed);
       return &state;
+    }
     if (unused == key) return &state;
   }
   if (!g_quality_viewport_capacity_exhausted.exchange(
           true, std::memory_order_relaxed)) {
     reshade::log::message(
         reshade::log::level::warning,
-        "mfgunlock: more than eight Streamline viewports were observed; additional viewports keep the conservative final-color path and are not state-tracked.");
+        "mfgunlock: Streamline viewport tracking capacity was exhausted; additional viewports keep the conservative final-color path and are not state-tracked.");
   }
   return nullptr;
 }
@@ -824,6 +832,18 @@ inline void RequestAllResets() {
     if (state.key.load(std::memory_order_acquire) != kUnusedViewport)
       RequestReset(&state);
   }
+}
+
+inline void ResetOutputValidationEvidence() {
+  // Invalidate an in-flight GetState sample before clearing the evidence it
+  // belongs to. HookedGetState publishes only when its captured epoch is still
+  // current, so an old request cannot re-confirm a new multiplier or Off state.
+  g_output_validation_epoch.fetch_add(1, std::memory_order_acq_rel);
+  g_state_seen.store(false, std::memory_order_release);
+  g_dlssg_status.store(0, std::memory_order_relaxed);
+  g_actual_frames_presented.store(0, std::memory_order_relaxed);
+  g_max_actual_frames_presented.store(0, std::memory_order_relaxed);
+  g_seen_present_counts.store(0, std::memory_order_relaxed);
 }
 
 inline void ForgetOutputDescriptions() {
@@ -860,7 +880,9 @@ inline void ObserveOptionsTransition(const sl::ViewportHandle& viewport,
 
   const uint32_t mode = static_cast<uint32_t>(options.mode);
   const uint32_t flags = static_cast<uint32_t>(options.flags);
-  const bool changed = state->options_seen.load(std::memory_order_acquire) &&
+  const bool options_were_seen =
+      state->options_seen.load(std::memory_order_acquire);
+  const bool changed = options_were_seen &&
       (state->mode.load(std::memory_order_relaxed) != mode ||
        state->generated_frames.load(std::memory_order_relaxed) != generated_frames ||
        state->flags.load(std::memory_order_relaxed) != flags ||
@@ -919,6 +941,7 @@ inline void ObserveOptionsTransition(const sl::ViewportHandle& viewport,
       std::memory_order_relaxed);
   state->options_seen.store(true, std::memory_order_release);
   ReleaseSRWLockExclusive(&state->lock);
+  if (!options_were_seen || changed) ResetOutputValidationEvidence();
   if (changed && UsesQualityGuard()) {
     RequestReset(state);
   }
@@ -1261,10 +1284,16 @@ inline sl::Result FilterHudSeparationTags(const sl::ViewportHandle& viewport,
   QualityViewportState* state = GetQualityState(viewport);
   const bool hdr_active = g_hdr_active.load(std::memory_order_relaxed);
   qualityguard::OutputDescription expected{};
+  bool snapshot_contended = false;
   if (state != nullptr) {
-    AcquireSRWLockShared(&state->lock);
-    expected = ExpectedOutput(state);
-    ReleaseSRWLockShared(&state->lock);
+    if (TryAcquireSRWLockShared(&state->lock)) {
+      expected = ExpectedOutput(state);
+      ReleaseSRWLockShared(&state->lock);
+    } else {
+      snapshot_contended = true;
+      g_quality_tag_lock_contentions.fetch_add(1,
+                                                std::memory_order_relaxed);
+    }
   }
   const qualityguard::Assessment assessment = qualityguard::AssessTags(
       tags, count, hdr_active, expected, g_format_api.load(std::memory_order_relaxed));
@@ -1274,8 +1303,7 @@ inline sl::Result FilterHudSeparationTags(const sl::ViewportHandle& viewport,
   const uint32_t tag_frame_index = frame != nullptr ? uint32_t(*frame) : 0;
   bool recomposition_eligible = false;
   bool suppress_hud_separation = assessment.suppress_hud_separation;
-  if (state != nullptr) {
-    AcquireSRWLockExclusive(&state->lock);
+  if (state != nullptr && TryAcquireSRWLockExclusive(&state->lock)) {
     // Do not certify a current frame using optional resources whose lifetime
     // ended at the previous Present. Do not retain caller-owned descriptors.
     // Split frame-aware batches conservatively use final color unless a full
@@ -1384,6 +1412,15 @@ inline sl::Result FilterHudSeparationTags(const sl::ViewportHandle& viewport,
       }
     }
     ReleaseSRWLockExclusive(&state->lock);
+    if (snapshot_contended && assessment.has_hud_separation)
+      suppress_hud_separation = true;
+  } else if (state != nullptr) {
+    // This hook can run on the game's submission thread. Never wait behind a
+    // simultaneous options/tag transition. Required resources pass through,
+    // while an optional HUD split fails closed to final color for this call.
+    g_quality_tag_lock_contentions.fetch_add(1,
+                                              std::memory_order_relaxed);
+    if (assessment.has_hud_separation) suppress_hud_separation = true;
   } else if (hybrid && assessment.has_hud_separation) {
     // No viewport state means validation cannot be carried across split tag
     // submissions, so keep the conservative final-color behavior.
@@ -1858,6 +1895,8 @@ inline sl::Result HookedGetState(const sl::ViewportHandle& viewport, sl::DLSSGSt
     return real(viewport, state, options);
 
   const size_t caller_version = state.structVersion;
+  const uint64_t output_validation_epoch =
+      g_output_validation_epoch.load(std::memory_order_acquire);
   VramEstimateRequest vram_request{};
   const bool vram_query = options == nullptr &&
       TakeVramEstimate(static_cast<uint32_t>(viewport), vram_request);
@@ -1944,7 +1983,9 @@ inline sl::Result HookedGetState(const sl::ViewportHandle& viewport, sl::DLSSGSt
   }
   const unsigned int raw_result = static_cast<unsigned int>(result);
   g_state_result.store(raw_result, std::memory_order_relaxed);
-  if (result == sl::Result::eOk) {
+  if (result == sl::Result::eOk &&
+      output_validation_epoch ==
+          g_output_validation_epoch.load(std::memory_order_acquire)) {
     const unsigned int status = static_cast<unsigned int>(observed_state->status);
     g_dlssg_status.store(status, std::memory_order_relaxed);
     const unsigned int presented = observed_state->numFramesActuallyPresented;

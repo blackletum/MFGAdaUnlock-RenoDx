@@ -128,6 +128,7 @@
 #include "./ngx_hook.hpp"
 #include "./pacing_policy.hpp"
 #include "./thin_geometry.hpp"
+#include "./validation_status.hpp"
 #include "./blackwell.hpp"
 
 namespace {
@@ -2103,20 +2104,21 @@ void UpdateLatencyGuard(reshade::api::swapchain* swapchain) {
   if (now < next_sample) return;
   next_sample = now + 500;
 
-  LARGE_INTEGER sample_begin{}, sample_end{}, sample_frequency{};
-  QueryPerformanceFrequency(&sample_frequency);
+  LARGE_INTEGER sample_begin{}, sample_end{};
+  const uint64_t sample_frequency =
+      mfgunlock::nvapistatus::QpcFrequency();
   QueryPerformanceCounter(&sample_begin);
   const auto observation = mfgunlock::nvapistatus::ObserveGuard(
       reinterpret_cast<IUnknown*>(
           static_cast<uintptr_t>(device->get_native())),
       mfgunlock::framecount::g_latency_guard_epoch.load(std::memory_order_acquire));
   QueryPerformanceCounter(&sample_end);
-  const uint32_t sample_cost_us = sample_frequency.QuadPart > 0 &&
+  const uint32_t sample_cost_us = sample_frequency > 0 &&
           sample_end.QuadPart >= sample_begin.QuadPart
       ? static_cast<uint32_t>((std::min)(
             uint64_t{UINT32_MAX},
             static_cast<uint64_t>(sample_end.QuadPart - sample_begin.QuadPart) *
-                1000000ull / static_cast<uint64_t>(sample_frequency.QuadPart)))
+                 1000000ull / sample_frequency))
       : 0;
   ObserveDxgiLatencyPolicy(swapchain);
   const uint32_t refresh_fps = DetectDisplayRefreshFps(swapchain);
@@ -3326,6 +3328,60 @@ const char* TimingValidationText(uint32_t issues) {
   return "Unclassified timing validation failure";
 }
 
+const char* ValidationStageName(mfgunlock::validation::Stage stage) {
+  using mfgunlock::validation::Stage;
+  switch (stage) {
+    case Stage::kNativeRequestObserved:
+      return "native request observed";
+    case Stage::kRequestAccepted:
+      return "request accepted";
+    case Stage::kDriverMultiplierActive:
+      return "driver multiplier active";
+    case Stage::kProviderOutputConfirmed:
+      return "provider output confirmed";
+    case Stage::kRequestRejected:
+      return "request rejected; native fallback preserved";
+    case Stage::kRuntimeError:
+      return "runtime error";
+    case Stage::kWaitingForGameRequest:
+    default:
+      return "waiting for game request";
+  }
+}
+
+std::string ValidationStatusText(mfgunlock::validation::Stage stage,
+                                 bool dynamic_accepted,
+                                 bool effective_seen,
+                                 unsigned int effective_multiplier,
+                                 unsigned int driver_multiplier,
+                                 unsigned int provider_presentations) {
+  using mfgunlock::validation::Stage;
+  switch (stage) {
+    case Stage::kRuntimeError:
+      return "DLSS-G runtime reported an error";
+    case Stage::kRequestRejected:
+      return "Addon request rejected; game fallback preserved";
+    case Stage::kProviderOutputConfirmed:
+      return std::to_string(provider_presentations) +
+             " presentation(s) reported by provider";
+    case Stage::kDriverMultiplierActive:
+      return std::to_string(driver_multiplier) +
+             "x live reported by driver";
+    case Stage::kRequestAccepted:
+      if (dynamic_accepted)
+        return "Dynamic request accepted; output telemetry unavailable";
+      if (effective_seen)
+        return std::to_string(effective_multiplier) +
+               "x request accepted; output telemetry unavailable";
+      return "Request accepted; output telemetry unavailable";
+    case Stage::kNativeRequestObserved:
+      return "Game request observed; waiting for runtime result";
+    case Stage::kWaitingForGameRequest:
+    default:
+      return "Waiting for game Frame Generation request";
+  }
+}
+
 const char* LatencyBottleneckText(
     mfgunlock::pacing::LatencyBottleneck bottleneck) {
   using mfgunlock::pacing::LatencyBottleneck;
@@ -4272,6 +4328,10 @@ void OnRegisterOverlay(reshade::api::effect_runtime* runtime) {
   const auto& nvapi_status = ObserveNvapiUiStatus(runtime);
   const bool sleep_status_available =
       nvapi_status.sleep_status == mfgunlock::nvapistatus::kOk;
+  const unsigned int driver_multiplier =
+      sleep_status_available
+          ? nvapi_status.sleep.frame_generation_multiplier
+          : 0;
   const bool driver_vsync_active =
       sleep_status_available && nvapi_status.sleep.control_panel_vsync != 0;
   const bool gsync_active =
@@ -4332,9 +4392,38 @@ void OnRegisterOverlay(reshade::api::effect_runtime* runtime) {
           mfgunlock::framecount::g_runtime_selection_mode.load(
               std::memory_order_relaxed);
 
+  const auto fixed_status =
+      static_cast<mfgunlock::forcepolicy::FixedOverrideStatus>(
+          mfgunlock::framecount::g_fixed_override_status.load(
+              std::memory_order_acquire));
+  const bool dynamic_accepted =
+      mfgunlock::framecount::g_dynamic_applied.load(
+          std::memory_order_acquire);
+  const bool request_rejected =
+      fixed_status ==
+          mfgunlock::forcepolicy::FixedOverrideStatus::kRejected ||
+      mfgunlock::framecount::g_dynamic_runtime_declined.load(
+          std::memory_order_acquire);
   const bool runtime_error = state_seen && dlssg_status != 0;
-  const bool mfg_confirmed = state_seen && dlssg_status == 0 &&
-                             observed_presentations > 1;
+  const auto validation_stage = mfgunlock::validation::Classify({
+      game_request_seen,
+      effective_seen || dynamic_accepted,
+      request_rejected,
+      runtime_error,
+      sleep_status_available,
+      driver_multiplier,
+      state_seen && dlssg_status == 0,
+      observed_presentations});
+  const std::string validation_text = ValidationStatusText(
+      validation_stage, dynamic_accepted, effective_seen,
+      effective_multiplier, driver_multiplier, observed_presentations);
+  const bool mfg_confirmed =
+      validation_stage ==
+      mfgunlock::validation::Stage::kProviderOutputConfirmed;
+  const bool mfg_live =
+      mfgunlock::validation::HasLiveRuntimeEvidence(validation_stage);
+  const bool mfg_request_accepted =
+      mfgunlock::validation::HasAcceptedRequest(validation_stage);
   const bool provider_ready =
       g_gate_patched.load(std::memory_order_acquire) &&
       mfgunlock::framecount::g_hooked.load(std::memory_order_acquire);
@@ -4375,17 +4464,33 @@ void OnRegisterOverlay(reshade::api::effect_runtime* runtime) {
 
   ImGui::TextUnformatted("MFG Unlock");
   ImGui::Separator();
-  if (runtime_error) {
+  if (validation_stage == mfgunlock::validation::Stage::kRuntimeError) {
     ImGui::TextColored(kUiError, "Compatibility issue");
   } else if (!enabled) {
     ImGui::TextColored(kUiMuted, "Inactive this session");
   } else if (dynamic_enabled && dynamic_hard_unavailable) {
     ImGui::TextColored(kUiWarning,
                        "Dynamic MFG unavailable - fixed fallback remains active");
-  } else if (mfg_confirmed) {
+  } else if (validation_stage ==
+             mfgunlock::validation::Stage::kProviderOutputConfirmed) {
     ImGui::TextColored(kUiPositive, "Working correctly");
+  } else if (validation_stage ==
+             mfgunlock::validation::Stage::kDriverMultiplierActive) {
+    ImGui::TextColored(kUiPositive, "%ux live reported by driver",
+                       driver_multiplier);
+  } else if (validation_stage ==
+             mfgunlock::validation::Stage::kRequestAccepted) {
+    ImGui::TextColored(kUiPositive, "%s", validation_text.c_str());
+  } else if (validation_stage ==
+             mfgunlock::validation::Stage::kRequestRejected) {
+    ImGui::TextColored(kUiWarning,
+                       "Override rejected - game fallback remains active");
+  } else if (validation_stage ==
+             mfgunlock::validation::Stage::kNativeRequestObserved) {
+    ImGui::TextColored(kUiWarning,
+                       "Game request observed - waiting for runtime result");
   } else if (provider_ready) {
-    ImGui::TextColored(kUiWarning, "Ready - waiting for generated output");
+    ImGui::TextColored(kUiWarning, "Ready - waiting for game request");
   } else {
     ImGui::TextColored(kUiWarning, "Waiting for DLSS Frame Generation");
   }
@@ -4415,7 +4520,10 @@ void OnRegisterOverlay(reshade::api::effect_runtime* runtime) {
                           : (gsync_active ? "G-SYNC active; driver VSync off"
                                           : "Driver VSync/G-SYNC inactive")));
     StatusRow("MFG", multiplier_text.c_str(),
-              mfg_confirmed ? kUiPositive : kUiMuted);
+              mfg_live || mfg_request_accepted
+                  ? kUiPositive
+                  : (runtime_error || request_rejected ? kUiWarning
+                                                       : kUiMuted));
     StatusRow("Renderer", RenderApiName(render_api),
               render_api == DetectedRenderApi::kUnknown ? kUiMuted
                                                         : kUiPositive);
@@ -5053,6 +5161,10 @@ void OnRegisterOverlay(reshade::api::effect_runtime* runtime) {
         "and queueing are both verified, then may test a small source-rate trim.\n"
         "It restores the saved/native behavior if measured latency does not improve.\n"
         "It does not replace Reflex or change Dynamic MFG, VSync or G-SYNC behavior.");
+    ImGui::TextDisabled(
+        "Real/source FPS comes from game markers. Estimated output FPS is source FPS x the driver-reported multiplier; it is not a displayed-frame measurement.");
+    HelpMarker(
+        "ReShade and NVIDIA overlays may expose rendered/source FPS depending on their selected metric. Confirm actual displayed output with FrameView or PresentMon Displayed FPS.");
     }
   }
 
@@ -5315,28 +5427,32 @@ void OnRegisterOverlay(reshade::api::effect_runtime* runtime) {
               ? std::to_string(mfgunlock::framecount::g_actual_frames_presented.load(
                     std::memory_order_relaxed))
               : "No sample";
-      StatusRow("Presentations", actual_text.c_str(), kUiMuted);
-      StatusRow("Validation",
-                runtime_error ? "Failed"
-                              : (mfg_confirmed ? "Passed" : "Pending"),
-                runtime_error ? kUiError
-                              : (mfg_confirmed ? kUiPositive : kUiWarning));
+      const std::string live_multiplier =
+          driver_multiplier >= 2
+              ? std::to_string(driver_multiplier) + "x live"
+              : "Not reported";
+      StatusRow("Driver live multiplier", live_multiplier.c_str(),
+                driver_multiplier >= 2 ? kUiPositive : kUiMuted);
+      StatusRow("Provider presentations", actual_text.c_str(),
+                mfg_confirmed ? kUiPositive : kUiMuted);
+      StatusRow("Validation evidence", validation_text.c_str(),
+                runtime_error
+                    ? kUiError
+                    : (request_rejected
+                           ? kUiWarning
+                           : (mfg_request_accepted ? kUiPositive : kUiMuted)));
       StatusRow("Dynamic MFG",
                 mfgunlock::framecount::g_dynamic_applied.load(
                     std::memory_order_relaxed)
                     ? "Active"
                     : (dynamic_available ? "Available" : "Inactive"),
                 kUiMuted);
-      const std::string live_multiplier =
-          sleep_status_available &&
-                  nvapi_status.sleep.frame_generation_multiplier >= 2
-              ? std::to_string(
-                    nvapi_status.sleep.frame_generation_multiplier) +
-                    "x"
-              : "Not reported";
-      StatusRow("NVAPI live multiplier", live_multiplier.c_str(), kUiMuted);
       ImGui::EndTable();
     }
+    ImGui::TextDisabled(
+        "Evidence is layered: an accepted request, a driver-live multiplier and provider output are separate observations.");
+    HelpMarker(
+        "ReShade's FPS counter and many overlays can report game/source Presents rather than frames scanned out after DLSS-G. Estimated output FPS is never treated as a measured result here. Use FrameView or PresentMon Displayed FPS for external confirmation.");
 
     ImGui::Spacing();
     ImGui::TextDisabled("PATCHES");
@@ -5461,6 +5577,26 @@ void OnRegisterOverlay(reshade::api::effect_runtime* runtime) {
                     ? "Filtered incompatible input"
                     : "No filtering reported",
                 kUiMuted);
+      const unsigned int tracked_viewports =
+          mfgunlock::framecount::g_quality_viewport_count.load(
+              std::memory_order_relaxed);
+      const bool viewport_capacity_exhausted =
+          mfgunlock::framecount::g_quality_viewport_capacity_exhausted.load(
+              std::memory_order_acquire);
+      const std::string viewport_text =
+          std::to_string(tracked_viewports) + " / " +
+          std::to_string(mfgunlock::framecount::kMaxQualityViewports) +
+          (viewport_capacity_exhausted ? "; capacity exhausted" : " tracked");
+      StatusRow("Quality Guard viewports", viewport_text.c_str(),
+                viewport_capacity_exhausted ? kUiWarning : kUiMuted);
+      const auto tag_lock_contentions =
+          mfgunlock::framecount::g_quality_tag_lock_contentions.load(
+              std::memory_order_relaxed);
+      const std::string contention_text =
+          std::to_string(tag_lock_contentions) +
+          " non-blocking fallback(s)";
+      StatusRow("Quality Guard contention", contention_text.c_str(),
+                tag_lock_contentions == 0 ? kUiMuted : kUiWarning);
       ImGui::EndTable();
     }
 
@@ -5497,6 +5633,15 @@ void OnRegisterOverlay(reshade::api::effect_runtime* runtime) {
            << "Effective request: "
            << (effective_seen ? std::to_string(effective_multiplier) + "x"
                               : "Not observed")
+           << '\n'
+           << "Driver live multiplier: "
+           << (driver_multiplier >= 2
+                   ? std::to_string(driver_multiplier) + "x"
+                   : "Not reported")
+           << '\n'
+           << "Provider presentations: "
+           << (state_seen ? std::to_string(observed_presentations)
+                          : "Not sampled")
            << '\n'
            << "Dynamic MFG: "
            << (mfgunlock::framecount::g_dynamic_applied.load(
@@ -5590,6 +5735,10 @@ void OnRegisterOverlay(reshade::api::effect_runtime* runtime) {
            << mfgunlock::framecount::g_latency_guard_estimated_source_fps.load(
                   std::memory_order_relaxed)
            << '\n'
+           << "Estimated output FPS (not measured): "
+           << mfgunlock::framecount::g_latency_guard_projected_output_fps.load(
+                  std::memory_order_relaxed)
+           << '\n'
            << "Simulation marker FPS: "
            << mfgunlock::framecount::g_latency_guard_simulation_fps.load(
                   std::memory_order_relaxed)
@@ -5666,9 +5815,20 @@ void OnRegisterOverlay(reshade::api::effect_runtime* runtime) {
            << mfgunlock::framecount::g_quality_issue_mask.load(
                   std::memory_order_relaxed)
            << std::dec << '\n'
-           << "Validation: "
-           << (runtime_error ? "Failed" : (mfg_confirmed ? "Passed" : "Pending"))
+           << "Quality Guard viewports: "
+           << mfgunlock::framecount::g_quality_viewport_count.load(
+                  std::memory_order_relaxed)
+           << '/' << mfgunlock::framecount::kMaxQualityViewports
+           << (mfgunlock::framecount::g_quality_viewport_capacity_exhausted.load(
+                       std::memory_order_acquire)
+                   ? " (capacity exhausted)" : "")
            << '\n'
+           << "Quality Guard tag-lock contention fallbacks: "
+           << mfgunlock::framecount::g_quality_tag_lock_contentions.load(
+                  std::memory_order_relaxed)
+           << '\n'
+           << "Validation evidence: " << ValidationStageName(validation_stage)
+           << " -- " << validation_text << '\n'
            << "Architecture gates: " << (gate_patched ? "Active" : "Pending")
            << " (providers " << gate_provider_count << ", sites "
            << gate_site_count << ")\n"
