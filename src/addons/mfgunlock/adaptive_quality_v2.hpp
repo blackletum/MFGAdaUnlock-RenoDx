@@ -36,22 +36,42 @@ sub.f32 %qf5, %qf10, 0f3E4CCCCD;
 mul.sat.f32 %qf5, %qf5, 0f40555555;
 min.f32 %qf5, %qf5, %qf3;
 max.f32 %qf5, %qf5, %qf2;
+// MFGUNLOCK_CONFIDENCE_ENDPOINT_FAST_PATHS_V2
+// Invalid/zero-confidence candidates cannot contribute. Full confidence is
+// exactly the already-clamped V1 target in qf0/qf1. Skip the interpolation in
+// both endpoint cases; partial confidence keeps the original V2 sequence.
+@!%qv0 mov.f32 %qf0, 0f00000000;
+@!%qv0 bra MFGUNLOCK_FORWARD_CONFIDENCE_DONE_V2;
+setp.le.f32 %qv5, %qf4, 0f00000000;
+@%qv5 mov.f32 %qf0, 0f00000000;
+@%qv5 bra MFGUNLOCK_FORWARD_CONFIDENCE_DONE_V2;
+setp.ge.f32 %qv5, %qf4, 0f3F800000;
+@%qv5 bra MFGUNLOCK_FORWARD_CONFIDENCE_DONE_V2;
 // Smoothstep confidence has zero slope at both endpoints.
 fma.rn.f32 %qf7, %qf4, 0fC0000000, 0f40400000;
 mul.f32 %qf4, %qf4, %qf4;
 mul.f32 %qf4, %qf4, %qf7;
-fma.rn.f32 %qf7, %qf5, 0fC0000000, 0f40400000;
-mul.f32 %qf5, %qf5, %qf5;
-mul.f32 %qf5, %qf5, %qf7;
 // First reconstruct the V1 target from its native anchor, then fade the whole
 // addon contribution from zero. Confidence zero is therefore an exact no-op;
 // confidence one is the V1 result.
 sub.f32 %qf6, %qf0, %qf8;
 fma.rn.f32 %qf0, %qf4, %qf6, %qf8;
 mul.f32 %qf0, %qf0, %qf4;
+MFGUNLOCK_FORWARD_CONFIDENCE_DONE_V2:
+@!%qv1 mov.f32 %qf1, 0f00000000;
+@!%qv1 bra MFGUNLOCK_INVERSE_CONFIDENCE_DONE_V2;
+setp.le.f32 %qv5, %qf5, 0f00000000;
+@%qv5 mov.f32 %qf1, 0f00000000;
+@%qv5 bra MFGUNLOCK_INVERSE_CONFIDENCE_DONE_V2;
+setp.ge.f32 %qv5, %qf5, 0f3F800000;
+@%qv5 bra MFGUNLOCK_INVERSE_CONFIDENCE_DONE_V2;
+fma.rn.f32 %qf7, %qf5, 0fC0000000, 0f40400000;
+mul.f32 %qf5, %qf5, %qf5;
+mul.f32 %qf5, %qf5, %qf7;
 sub.f32 %qf6, %qf1, %qf10;
 fma.rn.f32 %qf1, %qf5, %qf6, %qf10;
 mul.f32 %qf1, %qf1, %qf5;
+MFGUNLOCK_INVERSE_CONFIDENCE_DONE_V2:
 )PTX";
 
 inline constexpr const char* kBorderConfidence = R"PTX(
@@ -132,7 +152,10 @@ inline float EffectiveWarpWeight(float native_weight, float v1_target,
   };
   native_weight = clamp01(native_weight);
   v1_target = clamp01(v1_target);
-  confidence = Smoothstep01(clamp01(confidence));
+  confidence = clamp01(confidence);
+  if (confidence == 0.0f) return 0.0f;
+  if (confidence == 1.0f) return v1_target;
+  confidence = Smoothstep01(confidence);
   const float v1_weight =
       native_weight + confidence * (v1_target - native_weight);
   return confidence * v1_weight;

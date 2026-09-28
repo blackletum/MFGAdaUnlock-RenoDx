@@ -2219,15 +2219,17 @@ void UpdateLatencyGuard(reshade::api::swapchain* swapchain) {
   mfgunlock::framecount::g_latency_guard_iflip_active.store(
       sleep_available && observation.sleep.fullscreen_independent_flip != 0,
       std::memory_order_relaxed);
-  mfgunlock::framecount::g_latency_guard_bottleneck.store(
-      static_cast<unsigned int>(mfgunlock::pacing::ClassifyLatencyBottleneck(
+  const auto latency_bottleneck =
+      mfgunlock::pacing::ClassifyLatencyBottleneck(
           observation.source_timing_confident,
           recommendation.source_oversubscribed,
           observation.queue_timing_confident
               ? observation.p95_queue_wait_us : 0,
           observed_source_interval_us,
           observation.median_gpu_active_us,
-          observation.median_ai_frame_time_us)),
+          observation.median_ai_frame_time_us);
+  mfgunlock::framecount::g_latency_guard_bottleneck.store(
+      static_cast<unsigned int>(latency_bottleneck),
       std::memory_order_relaxed);
   mfgunlock::framecount::g_latency_guard_timing_samples.store(
       observation.consecutive_timing_samples, std::memory_order_relaxed);
@@ -2264,33 +2266,68 @@ void UpdateLatencyGuard(reshade::api::swapchain* swapchain) {
       mfgunlock::framecount::g_reflex_native_limit_us.load(std::memory_order_relaxed) == 0;
   const uint32_t configured_multiplier =
       mfgunlock::framecount::g_force_multiplier.load(std::memory_order_relaxed);
-  const bool multiplier_candidate = safe &&
-      mfgunlock::pacing::ShouldTrialLowerMultiplier(
-          guard_mode, marker_health, configured_multiplier,
-          recommendation.suggested_total_multiplier,
-          mfgunlock::framecount::g_dynamic_applied.load(
-              std::memory_order_relaxed),
-          recommendation.source_oversubscribed,
-          recommendation.sustained_queue_pressure);
   const uint32_t old_multiplier_override =
       mfgunlock::framecount::g_latency_guard_multiplier_override.load(
           std::memory_order_relaxed);
-  const bool continue_multiplier_trial =
-      old_multiplier_override != 0 && safe;
+  const bool multiplier_safe = safe &&
+      mfgunlock::framecount::g_latency_guard_active_source_cap_fps.load(
+          std::memory_order_relaxed) == 0;
+  const auto responsive_reason = multiplier_safe
+      ? mfgunlock::latency::ClassifyResponsiveTrialReason(
+            recommendation.source_oversubscribed,
+            observed_source_interval_us,
+            observation.queue_timing_confident
+                ? observation.p95_queue_wait_us : 0,
+            observation.median_ai_frame_time_us)
+      : mfgunlock::latency::ResponsiveTrialReason::kNone;
+  const mfgunlock::latency::MultiplierTrialSample multiplier_sample{
+      observed_source_interval_us,
+      queue_wait_us,
+      observation.p95_queue_wait_us,
+      pipeline_latency_us,
+      observation.p95_pipeline_latency_us,
+      observation.median_ai_frame_time_us};
   const uint32_t multiplier_override = multiplier_trial.Update(
       now,
       mfgunlock::framecount::g_latency_guard_epoch.load(
           std::memory_order_acquire),
-      configured_multiplier, live_multiplier,
-      multiplier_candidate || continue_multiplier_trial,
-      multiplier_candidate ? recommendation.suggested_total_multiplier
-                           : old_multiplier_override,
-      observed_source_interval_us, queue_wait_us, pipeline_latency_us,
-      observation.median_ai_frame_time_us);
+      configured_multiplier, live_multiplier, multiplier_safe,
+      responsive_reason, multiplier_sample);
   mfgunlock::framecount::g_latency_guard_multiplier_override.store(
       multiplier_override, std::memory_order_release);
   mfgunlock::framecount::g_latency_guard_multiplier_trial_accepted.store(
       multiplier_trial.accepted, std::memory_order_relaxed);
+  mfgunlock::framecount::g_latency_guard_multiplier_trial_phase.store(
+      static_cast<unsigned int>(multiplier_trial.phase),
+      std::memory_order_relaxed);
+  mfgunlock::framecount::g_latency_guard_multiplier_trial_reason.store(
+      static_cast<unsigned int>(multiplier_trial.reason),
+      std::memory_order_relaxed);
+  mfgunlock::framecount::g_latency_guard_multiplier_approved.store(
+      multiplier_trial.approved_multiplier, std::memory_order_relaxed);
+  mfgunlock::framecount::g_latency_guard_multiplier_candidate.store(
+      multiplier_trial.candidate_multiplier, std::memory_order_relaxed);
+  mfgunlock::framecount::g_latency_guard_multiplier_baseline_samples.store(
+      static_cast<unsigned int>(multiplier_trial.baseline_window.count),
+      std::memory_order_relaxed);
+  mfgunlock::framecount::g_latency_guard_multiplier_trial_samples.store(
+      static_cast<unsigned int>(multiplier_trial.candidate_window.count),
+      std::memory_order_relaxed);
+  mfgunlock::framecount::g_latency_guard_multiplier_baseline_pipeline_us.store(
+      multiplier_trial.last_compared_baseline.samples != 0
+          ? multiplier_trial.last_compared_baseline.pipeline_us
+          : multiplier_trial.baseline.pipeline_us,
+      std::memory_order_relaxed);
+  mfgunlock::framecount::g_latency_guard_multiplier_baseline_p95_us.store(
+      multiplier_trial.last_compared_baseline.samples != 0
+          ? multiplier_trial.last_compared_baseline.pipeline_p95_us
+          : multiplier_trial.baseline.pipeline_p95_us,
+      std::memory_order_relaxed);
+  mfgunlock::framecount::g_latency_guard_multiplier_trial_pipeline_us.store(
+      multiplier_trial.latest_trial.pipeline_us, std::memory_order_relaxed);
+  mfgunlock::framecount::g_latency_guard_multiplier_trial_p95_us.store(
+      multiplier_trial.latest_trial.pipeline_p95_us,
+      std::memory_order_relaxed);
   if (old_multiplier_override != multiplier_override) {
     // The next normal game SetOptions submission picks up (or releases) the
     // bounded runtime override. Never call Streamline from Present.
@@ -2298,14 +2335,26 @@ void UpdateLatencyGuard(reshade::api::swapchain* swapchain) {
                                                     std::memory_order_relaxed);
   }
   const bool multiplier_fallback_allowed = multiplier_override == 0 &&
-      multiplier_trial.attempted && now < multiplier_trial.cooldown_until;
+      multiplier_trial.attempted &&
+      multiplier_trial.phase ==
+          mfgunlock::latency::MultiplierTrialPhase::kCooldown;
+  const bool multiplier_sequence_active =
+      multiplier_trial.phase !=
+          mfgunlock::latency::MultiplierTrialPhase::kIdle &&
+      multiplier_trial.phase !=
+          mfgunlock::latency::MultiplierTrialPhase::kCooldown;
   const auto old_cap = mfgunlock::framecount::g_latency_guard_active_source_cap_fps.load(std::memory_order_relaxed);
   const auto cap = trial.Update(now,
       mfgunlock::framecount::g_latency_guard_epoch.load(std::memory_order_acquire), live_multiplier,
-      safe && multiplier_override == 0 &&
-          (!multiplier_candidate || multiplier_fallback_allowed),
+      safe && multiplier_override == 0 && !multiplier_sequence_active &&
+          (responsive_reason ==
+               mfgunlock::latency::ResponsiveTrialReason::kNone ||
+           multiplier_fallback_allowed),
       pressure_candidate && multiplier_override == 0 &&
-              (!multiplier_candidate || multiplier_fallback_allowed)
+              !multiplier_sequence_active &&
+              (responsive_reason ==
+                   mfgunlock::latency::ResponsiveTrialReason::kNone ||
+               multiplier_fallback_allowed)
           ? recommendation.source_cap_fps : 0,
       observed_source_interval_us, queue_wait_us, pipeline_latency_us);
   mfgunlock::framecount::g_latency_guard_active_source_cap_fps.store(cap, std::memory_order_relaxed);
@@ -3285,12 +3334,12 @@ void DrawLatencyGuardControl() {
         "Latency Guard",
         mode == static_cast<int>(
                     mfgunlock::pacing::LatencyGuardMode::kAutomatic)
-            ? "Tests a lower fixed multiplier first, then a small source trim if needed."
+            ? "Tests 6x -> 5x -> 4x -> 3x one step at a time when justified."
             : (mode == static_cast<int>(
                           mfgunlock::pacing::LatencyGuardMode::kMonitor)
                    ? "Read-only Reflex and render-queue monitoring."
                    : "No latency sampling or automatic cap."),
-        "Monitor Only is read-only and remains the recommended default. Automatic mode is available only with healthy, fresh Reflex timing and verified queue pressure. For an addon-forced fixed multiplier it first performs a bounded lower-multiplier trial; otherwise it may test a small source-FPS trim. It keeps a trial only after measured improvement and never rewrites the saved multiplier, Reflex mode, VSync, G-SYNC, Dynamic MFG or Reflex markers.",
+        "Monitor Only is read-only and remains the recommended default. Automatic mode requires healthy, fresh Reflex timing and starts only for sustained queue pressure, output saturation or significant DLSS-G workload. With an addon-forced 4x-6x selection it tests one lower multiplier at a time, never below 3x, and keeps only measured improvements. A small source-FPS trim remains a queue-only fallback. The saved multiplier, Reflex mode, VSync, G-SYNC, Dynamic MFG and Reflex markers are never rewritten.",
         mode == static_cast<int>(
                     mfgunlock::pacing::LatencyGuardMode::kAutomatic)
             ? "Advanced"
@@ -3441,6 +3490,44 @@ const char* LatencyBottleneckText(
       return "CPU/source-frame interval";
     default:
       return "Insufficient fresh timing data";
+  }
+}
+
+const char* ResponsiveTrialReasonText(
+    mfgunlock::latency::ResponsiveTrialReason reason) {
+  using mfgunlock::latency::ResponsiveTrialReason;
+  switch (reason) {
+    case ResponsiveTrialReason::kDisplayOversubscription:
+      return "Output saturation";
+    case ResponsiveTrialReason::kRenderQueue:
+      return "Sustained render queue";
+    case ResponsiveTrialReason::kFrameGenerationWorkload:
+      return "Significant DLSS-G workload";
+    default:
+      return "No responsive trial requested";
+  }
+}
+
+const char* MultiplierTrialPhaseText(
+    mfgunlock::latency::MultiplierTrialPhase phase) {
+  using mfgunlock::latency::MultiplierTrialPhase;
+  switch (phase) {
+    case MultiplierTrialPhase::kCollectingBaseline:
+      return "Collecting current-multiplier baseline";
+    case MultiplierTrialPhase::kWaitingForCandidate:
+      return "Waiting for the next lower multiplier";
+    case MultiplierTrialPhase::kMeasuringCandidate:
+      return "Measuring the next lower multiplier";
+    case MultiplierTrialPhase::kAccepted:
+      return "Last lower multiplier measured beneficial";
+    case MultiplierTrialPhase::kWaitingForOriginal:
+      return "Restoring saved multiplier for periodic check";
+    case MultiplierTrialPhase::kMeasuringOriginal:
+      return "Rechecking the saved multiplier";
+    case MultiplierTrialPhase::kCooldown:
+      return "No benefit measured; cooldown active";
+    default:
+      return "Monitoring; no responsive trial active";
   }
 }
 
@@ -5168,13 +5255,29 @@ void OnRegisterOverlay(reshade::api::effect_runtime* runtime) {
       const bool multiplier_accepted =
           mfgunlock::framecount::g_latency_guard_multiplier_trial_accepted.load(
               std::memory_order_relaxed);
+      const auto multiplier_phase =
+          static_cast<mfgunlock::latency::MultiplierTrialPhase>(
+              mfgunlock::framecount::g_latency_guard_multiplier_trial_phase.load(
+                  std::memory_order_relaxed));
+      const auto multiplier_reason =
+          static_cast<mfgunlock::latency::ResponsiveTrialReason>(
+              mfgunlock::framecount::g_latency_guard_multiplier_trial_reason.load(
+                  std::memory_order_relaxed));
+      const unsigned int saved_multiplier =
+          mfgunlock::framecount::g_force_multiplier.load(
+              std::memory_order_relaxed);
+      const unsigned int approved_multiplier =
+          mfgunlock::framecount::g_latency_guard_multiplier_approved.load(
+              std::memory_order_relaxed);
+      const unsigned int candidate_multiplier =
+          mfgunlock::framecount::g_latency_guard_multiplier_candidate.load(
+              std::memory_order_relaxed);
       const char* action =
           explicit_source_cap
               ? "Explicit source cap has priority"
-              : (multiplier_override != 0
-                     ? (multiplier_accepted
-                            ? "Lower-multiplier trial measured beneficial"
-                            : "Testing lower fixed multiplier")
+              : (multiplier_phase !=
+                         mfgunlock::latency::MultiplierTrialPhase::kIdle
+                     ? MultiplierTrialPhaseText(multiplier_phase)
                      : (limit_source == 2
                      ? "Queue trim active"
                      : (latency_guard_mode ==
@@ -5184,12 +5287,65 @@ void OnRegisterOverlay(reshade::api::effect_runtime* runtime) {
       StatusRow("Guard action", action,
                 limit_source == 2 || multiplier_override != 0
                     ? kUiPositive : kUiMuted);
-      if (multiplier_override != 0) {
-        const std::string override_text =
-            std::to_string(multiplier_override) +
-            "x runtime trial; saved setting unchanged";
-        StatusRow("Active multiplier trial", override_text.c_str(),
-                  kUiPositive);
+      if (saved_multiplier >= 2) {
+        const std::string saved_text =
+            std::to_string(saved_multiplier) + "x (never overwritten)";
+        StatusRow("Saved multiplier", saved_text.c_str(), kUiMuted);
+      }
+      if (multiplier_phase !=
+          mfgunlock::latency::MultiplierTrialPhase::kIdle) {
+        StatusRow("Responsive trial", MultiplierTrialPhaseText(multiplier_phase),
+                  multiplier_accepted ? kUiPositive : kUiWarning);
+        StatusRow("Trial reason", ResponsiveTrialReasonText(multiplier_reason),
+                  kUiMuted);
+        if (approved_multiplier >= 3 &&
+            approved_multiplier < saved_multiplier) {
+          const std::string approved_text =
+              std::to_string(approved_multiplier) +
+              "x is the last measured-beneficial step";
+          StatusRow("Last approved multiplier", approved_text.c_str(),
+                    kUiPositive);
+        }
+        if (candidate_multiplier >= 3 &&
+            candidate_multiplier != saved_multiplier) {
+          const std::string candidate_text =
+              std::to_string(approved_multiplier) + "x -> " +
+              std::to_string(candidate_multiplier) + "x";
+          StatusRow("Current trial step", candidate_text.c_str(),
+                    kUiWarning);
+        }
+        const unsigned int baseline_samples =
+            mfgunlock::framecount::g_latency_guard_multiplier_baseline_samples.load(
+                std::memory_order_relaxed);
+        const unsigned int trial_samples =
+            mfgunlock::framecount::g_latency_guard_multiplier_trial_samples.load(
+                std::memory_order_relaxed);
+        const std::string window_text =
+            "baseline " + std::to_string(baseline_samples) +
+            "/8; current " + std::to_string(trial_samples) + "/8";
+        StatusRow("Measurement windows", window_text.c_str(), kUiMuted);
+        const unsigned int baseline_pipeline =
+            mfgunlock::framecount::g_latency_guard_multiplier_baseline_pipeline_us.load(
+                std::memory_order_relaxed);
+        const unsigned int baseline_p95 =
+            mfgunlock::framecount::g_latency_guard_multiplier_baseline_p95_us.load(
+                std::memory_order_relaxed);
+        const unsigned int trial_pipeline =
+            mfgunlock::framecount::g_latency_guard_multiplier_trial_pipeline_us.load(
+                std::memory_order_relaxed);
+        const unsigned int trial_p95 =
+            mfgunlock::framecount::g_latency_guard_multiplier_trial_p95_us.load(
+                std::memory_order_relaxed);
+        if (baseline_pipeline != 0 && trial_pipeline != 0) {
+          const std::string comparison =
+              std::to_string(baseline_pipeline / 1000.0f).substr(0, 5) +
+              "/" + std::to_string(baseline_p95 / 1000.0f).substr(0, 5) +
+              " ms baseline -> " +
+              std::to_string(trial_pipeline / 1000.0f).substr(0, 5) +
+              "/" + std::to_string(trial_p95 / 1000.0f).substr(0, 5) +
+              " ms measured (median/p95)";
+          StatusRow("Pipeline comparison", comparison.c_str(), kUiMuted);
+        }
       }
       if (source_cap != 0 && limit_source != 2)
         StatusRow("Potential automatic trim", source_cap_text.c_str(),
@@ -5202,9 +5358,11 @@ void OnRegisterOverlay(reshade::api::effect_runtime* runtime) {
       ImGui::EndTable();
     }
     ImGui::TextDisabled(
-        "Automatic first tests a lower addon-forced multiplier when output saturation\n"
-        "and queueing are both verified, then may test a small source-rate trim.\n"
-        "It restores the saved/native behavior if measured latency does not improve.\n"
+        "Automatic tests fixed multipliers one step at a time (6x -> 5x -> 4x -> 3x)\n"
+        "when queueing, output saturation or DLSS-G workload justifies a trial.\n"
+        "Each step uses two eight-sample windows and is kept only after lower measured latency.\n"
+        "It periodically restores the saved multiplier for a new baseline and never goes below 3x.\n"
+        "A small source-rate trim is used only as a verified queue-pressure fallback.\n"
         "It does not replace Reflex or change Dynamic MFG, VSync or G-SYNC behavior.");
     ImGui::TextDisabled(
         "Real/source FPS comes from game markers. Estimated output FPS is source FPS x the driver-reported multiplier; it is not a displayed-frame measurement.");
@@ -5891,6 +6049,49 @@ void OnRegisterOverlay(reshade::api::effect_runtime* runtime) {
            << mfgunlock::framecount::g_latency_guard_multiplier_override.load(
                   std::memory_order_relaxed)
            << "x (0 = inactive; saved selection unchanged)\n"
+           << "Responsive multiplier phase: "
+           << MultiplierTrialPhaseText(
+                  static_cast<mfgunlock::latency::MultiplierTrialPhase>(
+                      mfgunlock::framecount::g_latency_guard_multiplier_trial_phase.load(
+                          std::memory_order_relaxed)))
+           << '\n'
+           << "Responsive trial reason: "
+           << ResponsiveTrialReasonText(
+                  static_cast<mfgunlock::latency::ResponsiveTrialReason>(
+                      mfgunlock::framecount::g_latency_guard_multiplier_trial_reason.load(
+                          std::memory_order_relaxed)))
+           << '\n'
+           << "Responsive multiplier saved/approved/candidate: "
+           << mfgunlock::framecount::g_force_multiplier.load(
+                  std::memory_order_relaxed)
+           << 'x' << '/'
+           << mfgunlock::framecount::g_latency_guard_multiplier_approved.load(
+                  std::memory_order_relaxed)
+           << 'x' << '/'
+           << mfgunlock::framecount::g_latency_guard_multiplier_candidate.load(
+                  std::memory_order_relaxed)
+           << "x\n"
+           << "Responsive baseline/trial samples: "
+           << mfgunlock::framecount::g_latency_guard_multiplier_baseline_samples.load(
+                  std::memory_order_relaxed)
+           << "/8; "
+           << mfgunlock::framecount::g_latency_guard_multiplier_trial_samples.load(
+                  std::memory_order_relaxed)
+           << "/8\n"
+           << "Responsive baseline pipeline median/p95 (us): "
+           << mfgunlock::framecount::g_latency_guard_multiplier_baseline_pipeline_us.load(
+                  std::memory_order_relaxed)
+           << '/'
+           << mfgunlock::framecount::g_latency_guard_multiplier_baseline_p95_us.load(
+                  std::memory_order_relaxed)
+           << '\n'
+           << "Responsive latest trial pipeline median/p95 (us): "
+           << mfgunlock::framecount::g_latency_guard_multiplier_trial_pipeline_us.load(
+                  std::memory_order_relaxed)
+           << '/'
+           << mfgunlock::framecount::g_latency_guard_multiplier_trial_p95_us.load(
+                  std::memory_order_relaxed)
+           << '\n'
            << "Automatic queue-trim cap: "
            << mfgunlock::framecount::g_latency_guard_active_source_cap_fps.load(
                   std::memory_order_relaxed)

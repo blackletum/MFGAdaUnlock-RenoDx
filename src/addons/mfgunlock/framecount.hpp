@@ -216,6 +216,16 @@ inline std::atomic<unsigned int> g_latency_guard_bottleneck{
     static_cast<unsigned int>(pacing::LatencyBottleneck::kInsufficientData)};
 inline std::atomic<unsigned int> g_latency_guard_multiplier_override{0};
 inline std::atomic_bool g_latency_guard_multiplier_trial_accepted{false};
+inline std::atomic<unsigned int> g_latency_guard_multiplier_trial_phase{0};
+inline std::atomic<unsigned int> g_latency_guard_multiplier_trial_reason{0};
+inline std::atomic<unsigned int> g_latency_guard_multiplier_approved{0};
+inline std::atomic<unsigned int> g_latency_guard_multiplier_candidate{0};
+inline std::atomic<unsigned int> g_latency_guard_multiplier_baseline_samples{0};
+inline std::atomic<unsigned int> g_latency_guard_multiplier_trial_samples{0};
+inline std::atomic<unsigned int> g_latency_guard_multiplier_baseline_pipeline_us{0};
+inline std::atomic<unsigned int> g_latency_guard_multiplier_baseline_p95_us{0};
+inline std::atomic<unsigned int> g_latency_guard_multiplier_trial_pipeline_us{0};
+inline std::atomic<unsigned int> g_latency_guard_multiplier_trial_p95_us{0};
 inline std::atomic<unsigned int> g_latency_guard_timing_samples{0};
 inline std::atomic_bool g_latency_guard_timing_confident{false};
 inline std::atomic_bool g_latency_guard_queue_timing_confident{false};
