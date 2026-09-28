@@ -2278,6 +2278,7 @@ void UpdateLatencyGuard(reshade::api::swapchain* swapchain) {
             observed_source_interval_us,
             observation.queue_timing_confident
                 ? observation.p95_queue_wait_us : 0,
+            pipeline_latency_us,
             observation.median_ai_frame_time_us)
       : mfgunlock::latency::ResponsiveTrialReason::kNone;
   const mfgunlock::latency::MultiplierTrialSample multiplier_sample{
@@ -3339,7 +3340,7 @@ void DrawLatencyGuardControl() {
                           mfgunlock::pacing::LatencyGuardMode::kMonitor)
                    ? "Read-only Reflex and render-queue monitoring."
                    : "No latency sampling or automatic cap."),
-        "Monitor Only is read-only and remains the recommended default. Automatic mode requires healthy, fresh Reflex timing and starts only for sustained queue pressure, output saturation or significant DLSS-G workload. With an addon-forced 4x-6x selection it tests one lower multiplier at a time, never below 3x, and keeps only measured improvements. A small source-FPS trim remains a queue-only fallback. The saved multiplier, Reflex mode, VSync, G-SYNC, Dynamic MFG and Reflex markers are never rewritten.",
+        "Monitor Only is read-only and remains the recommended default. Automatic mode requires healthy, fresh Reflex timing and starts only for sustained queue pressure, output saturation, significant DLSS-G workload or at least 60 ms of marker-to-GPU pipeline time. That 60-ms signal is not end-to-end display latency and only starts a measured trial. With an addon-forced 4x-6x selection it tests one lower multiplier at a time, never below 3x, and keeps only measured improvements. A small source-FPS trim remains a queue-only fallback. The saved multiplier, Reflex mode, VSync, G-SYNC, Dynamic MFG and Reflex markers are never rewritten.",
         mode == static_cast<int>(
                     mfgunlock::pacing::LatencyGuardMode::kAutomatic)
             ? "Advanced"
@@ -3501,6 +3502,8 @@ const char* ResponsiveTrialReasonText(
       return "Output saturation";
     case ResponsiveTrialReason::kRenderQueue:
       return "Sustained render queue";
+    case ResponsiveTrialReason::kHighPipelineLatency:
+      return "Marker-to-GPU pipeline at or above 60 ms";
     case ResponsiveTrialReason::kFrameGenerationWorkload:
       return "Significant DLSS-G workload";
     default:
@@ -5359,7 +5362,7 @@ void OnRegisterOverlay(reshade::api::effect_runtime* runtime) {
     }
     ImGui::TextDisabled(
         "Automatic tests fixed multipliers one step at a time (6x -> 5x -> 4x -> 3x)\n"
-        "when queueing, output saturation or DLSS-G workload justifies a trial.\n"
+        "when queueing, output saturation, DLSS-G workload or a >=60 ms marker-to-GPU pipeline justifies a trial.\n"
         "Each step uses two eight-sample windows and is kept only after lower measured latency.\n"
         "It periodically restores the saved multiplier for a new baseline and never goes below 3x.\n"
         "A small source-rate trim is used only as a verified queue-pressure fallback.\n"

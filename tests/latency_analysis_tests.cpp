@@ -81,15 +81,22 @@ int main() {
 
   using latency::MultiplierTrialPhase;
   using latency::ResponsiveTrialReason;
-  CHECK(latency::ClassifyResponsiveTrialReason(true, 10000, 3000, 1000) ==
+  CHECK(latency::ClassifyResponsiveTrialReason(true, 10000, 3000, 10000,
+                                                1000) ==
         ResponsiveTrialReason::kDisplayOversubscription);
-  CHECK(latency::ClassifyResponsiveTrialReason(true, 10000, 0, 1000) ==
+  CHECK(latency::ClassifyResponsiveTrialReason(true, 10000, 0, 10000, 1000) ==
         ResponsiveTrialReason::kDisplayOversubscription);
-  CHECK(latency::ClassifyResponsiveTrialReason(false, 10000, 3000, 1000) ==
+  CHECK(latency::ClassifyResponsiveTrialReason(false, 10000, 3000, 10000,
+                                                1000) ==
         ResponsiveTrialReason::kRenderQueue);
-  CHECK(latency::ClassifyResponsiveTrialReason(false, 20000, 1000, 4500) ==
+  CHECK(latency::ClassifyResponsiveTrialReason(false, 20000, 1000, 60000,
+                                                1000) ==
+        ResponsiveTrialReason::kHighPipelineLatency);
+  CHECK(latency::ClassifyResponsiveTrialReason(false, 20000, 1000, 59999,
+                                                4500) ==
         ResponsiveTrialReason::kFrameGenerationWorkload);
-  CHECK(latency::ClassifyResponsiveTrialReason(false, 20000, 1000, 2500) ==
+  CHECK(latency::ClassifyResponsiveTrialReason(false, 20000, 1000, 59999,
+                                                2500) ==
         ResponsiveTrialReason::kNone);
 
   const auto Sample = [](uint32_t interval, uint32_t queue,

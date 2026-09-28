@@ -78,18 +78,26 @@ enum class ResponsiveTrialReason : uint32_t {
   kNone = 0,
   kDisplayOversubscription,
   kRenderQueue,
+  kHighPipelineLatency,
   kFrameGenerationWorkload,
 };
 
+inline constexpr uint32_t kHighPipelineLatencyUs = 60000;
+
 inline constexpr ResponsiveTrialReason ClassifyResponsiveTrialReason(
     bool output_oversubscribed, uint32_t source_interval_us,
-    uint32_t queue_p95_us, uint32_t ai_us) {
+    uint32_t queue_p95_us, uint32_t pipeline_us, uint32_t ai_us) {
   const bool queue_pressure = source_interval_us != 0 &&
       queue_p95_us >= 1500 &&
       uint64_t(queue_p95_us) * 4 >= source_interval_us;
   if (output_oversubscribed)
     return ResponsiveTrialReason::kDisplayOversubscription;
   if (queue_pressure) return ResponsiveTrialReason::kRenderQueue;
+  // This is marker-to-GPU time, not end-to-end display latency. Crossing the
+  // threshold only starts a measured trial; it never makes a reduction
+  // permanent without a better median, a non-regressing p95 and stable FPS.
+  if (pipeline_us >= kHighPipelineLatencyUs)
+    return ResponsiveTrialReason::kHighPipelineLatency;
   // Reuse the established 3-ms significance floor, but also require the FG
   // workload to consume at least one fifth of a real-frame interval.
   if (source_interval_us != 0 && ai_us >= 3000 &&
