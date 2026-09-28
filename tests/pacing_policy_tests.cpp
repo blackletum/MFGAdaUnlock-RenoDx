@@ -29,6 +29,24 @@ int main() {
   CHECK(TargetFpsToFrameLimitUs(120) == 8333);
   CHECK(TargetFpsToFrameLimitUs(144) == 6944);
 
+  using mfgunlock::pacing::FixedOutputCapFrameLimitUs;
+  using mfgunlock::pacing::IsValidFixedOutputCap;
+  CHECK(!IsValidFixedOutputCap(0, 4));
+  CHECK(!IsValidFixedOutputCap(9, 4));
+  CHECK(!IsValidFixedOutputCap(240, 1));
+  CHECK(!IsValidFixedOutputCap(1001, 4));
+  CHECK(IsValidFixedOutputCap(10, 2));
+  CHECK(IsValidFixedOutputCap(1000, 6));
+  CHECK(IsValidFixedOutputCap(240, 4));
+  CHECK(FixedOutputCapFrameLimitUs(200, 2) == 10000);
+  CHECK(FixedOutputCapFrameLimitUs(200, 3) == 15000);
+  CHECK(FixedOutputCapFrameLimitUs(240, 4) == 16667);
+  CHECK(FixedOutputCapFrameLimitUs(200, 4) == 20000);
+  CHECK(FixedOutputCapFrameLimitUs(200, 5) == 25000);
+  CHECK(FixedOutputCapFrameLimitUs(200, 6) == 30000);
+  CHECK(FixedOutputCapFrameLimitUs(175, 3) == 17143);
+  CHECK(FixedOutputCapFrameLimitUs(240, 0) == 0);
+
   using mfgunlock::pacing::ShouldApplyReflexSourceCap;
   CHECK(!ShouldApplyReflexSourceCap(true, true, true, true, true, false, 100));
   CHECK(ShouldApplyReflexSourceCap(true, true, true, true, true, true, 100));

@@ -78,26 +78,56 @@ enum class ResponsiveTrialReason : uint32_t {
   kNone = 0,
   kDisplayOversubscription,
   kRenderQueue,
+  kHighInputLatency,
   kHighPipelineLatency,
+  kGpuSaturatedLatencyProxy,
   kFrameGenerationWorkload,
 };
 
+enum class ResponsiveTrialBlocker : uint32_t {
+  kNone = 0,
+  kMonitorOnly,
+  kReflexUnhealthy,
+  kSourceTimingUnverified,
+  kDynamicActive,
+  kFixedMultiplierRequired,
+  kLiveMultiplierUnconfirmed,
+  kReflexOptionsUnavailable,
+  kConflictingDynamicCap,
+  kFixedCapPending,
+  kNoTrigger,
+};
+
 inline constexpr uint32_t kHighPipelineLatencyUs = 60000;
+inline constexpr uint32_t kGpuProxyPipelineLatencyUs = 50000;
 
 inline constexpr ResponsiveTrialReason ClassifyResponsiveTrialReason(
     bool output_oversubscribed, uint32_t source_interval_us,
-    uint32_t queue_p95_us, uint32_t pipeline_us, uint32_t ai_us) {
+    uint32_t queue_p95_us, uint32_t input_to_gpu_us,
+    uint32_t pipeline_us, uint32_t gpu_active_us, uint32_t ai_us) {
   const bool queue_pressure = source_interval_us != 0 &&
       queue_p95_us >= 1500 &&
       uint64_t(queue_p95_us) * 4 >= source_interval_us;
   if (output_oversubscribed)
     return ResponsiveTrialReason::kDisplayOversubscription;
   if (queue_pressure) return ResponsiveTrialReason::kRenderQueue;
-  // This is marker-to-GPU time, not end-to-end display latency. Crossing the
-  // threshold only starts a measured trial; it never makes a reduction
-  // permanent without a better median, a non-regressing p95 and stable FPS.
+  if (input_to_gpu_us >= kHighPipelineLatencyUs)
+    return ResponsiveTrialReason::kHighInputLatency;
+  // Marker-to-GPU is not end-to-end display latency. Crossing the threshold
+  // only starts a measured trial; it never makes a reduction permanent
+  // without a better median, a non-regressing p95 and stable FPS.
   if (pipeline_us >= kHighPipelineLatencyUs)
     return ResponsiveTrialReason::kHighPipelineLatency;
+  // When a game does not emit input markers, a saturated base-GPU frame plus
+  // an already-long marker pipeline is a conservative responsiveness proxy.
+  // The measured before/after acceptance still decides whether any reduction
+  // survives the trial.
+  if (input_to_gpu_us == 0 && source_interval_us != 0 &&
+      pipeline_us >= kGpuProxyPipelineLatencyUs &&
+      uint64_t(gpu_active_us) * 100 >=
+          uint64_t(source_interval_us) * 80) {
+    return ResponsiveTrialReason::kGpuSaturatedLatencyProxy;
+  }
   // Reuse the established 3-ms significance floor, but also require the FG
   // workload to consume at least one fifth of a real-frame interval.
   if (source_interval_us != 0 && ai_us >= 3000 &&
@@ -195,9 +225,7 @@ inline constexpr bool MultiplierTrialImproved(
   }
   const bool source_stable =
       uint64_t(candidate.source_interval_us) * 100 <=
-          uint64_t(baseline.source_interval_us) * 108 &&
-      uint64_t(candidate.source_interval_us) * 100 >=
-          uint64_t(baseline.source_interval_us) * 85;
+          uint64_t(baseline.source_interval_us) * 108;
   const bool median_better =
       candidate.pipeline_us + 250 < baseline.pipeline_us;
   const bool tail_not_worse =
@@ -301,7 +329,8 @@ struct MultiplierTrial {
   uint32_t Update(uint64_t now, uint64_t new_epoch,
                   uint32_t configured_value, uint32_t live_multiplier,
                   bool safe, ResponsiveTrialReason trigger_reason,
-                  const MultiplierTrialSample& sample) {
+                  const MultiplierTrialSample& sample,
+                  bool sample_ready = true) {
     if (new_epoch != epoch || configured_value != configured)
       Reset(now, new_epoch, configured_value);
     if (!safe || configured < 4 || configured > 6) {
@@ -327,8 +356,16 @@ struct MultiplierTrial {
 
     if (phase == MultiplierTrialPhase::kCollectingBaseline) {
       if (trigger_reason == ResponsiveTrialReason::kNone ||
-          live_multiplier != approved_multiplier ||
-          !baseline_window.Add(sample)) {
+          live_multiplier != approved_multiplier) {
+        HoldApproved(now, false);
+        return override_multiplier;
+      }
+      if (trigger_reason != reason) StartBaseline(now, trigger_reason);
+      if (!sample_ready) {
+        baseline_window.Clear();
+        return override_multiplier;
+      }
+      if (!baseline_window.Add(sample)) {
         HoldApproved(now, false);
         return override_multiplier;
       }
@@ -340,7 +377,7 @@ struct MultiplierTrial {
     }
 
     if (phase == MultiplierTrialPhase::kWaitingForCandidate) {
-      if (live_multiplier == candidate_multiplier) {
+      if (live_multiplier == candidate_multiplier && sample_ready) {
         phase = MultiplierTrialPhase::kMeasuringCandidate;
         phase_started = now;
         candidate_window.Clear();
@@ -355,6 +392,12 @@ struct MultiplierTrial {
     }
 
     if (phase == MultiplierTrialPhase::kMeasuringCandidate) {
+      if (!sample_ready) {
+        candidate_window.Clear();
+        phase = MultiplierTrialPhase::kWaitingForCandidate;
+        phase_started = now;
+        return override_multiplier;
+      }
       if (live_multiplier != candidate_multiplier ||
           !candidate_window.Add(sample)) {
         HoldApproved(now, true);
@@ -393,7 +436,7 @@ struct MultiplierTrial {
     }
 
     if (phase == MultiplierTrialPhase::kWaitingForOriginal) {
-      if (live_multiplier == configured) {
+      if (live_multiplier == configured && sample_ready) {
         phase = MultiplierTrialPhase::kMeasuringOriginal;
         phase_started = now;
         candidate_window.Clear();
@@ -408,6 +451,12 @@ struct MultiplierTrial {
     }
 
     if (phase == MultiplierTrialPhase::kMeasuringOriginal) {
+      if (!sample_ready) {
+        candidate_window.Clear();
+        phase = MultiplierTrialPhase::kWaitingForOriginal;
+        phase_started = now;
+        return override_multiplier;
+      }
       if (live_multiplier != configured || !candidate_window.Add(sample)) {
         HoldApproved(now, false);
         return override_multiplier;

@@ -15,6 +15,10 @@
 
 int main() {
   using namespace mfgunlock::memorypolicy;
+  CHECK(SupportsDxgiBudget(GraphicsApi::kD3D11));
+  CHECK(SupportsDxgiBudget(GraphicsApi::kD3D12));
+  CHECK(!SupportsDxgiBudget(GraphicsApi::kVulkan));
+  CHECK(!SupportsDxgiBudget(GraphicsApi::kUnknown));
   EstimateInputs input{};
   CHECK(BuildEstimatePlan(input).readiness ==
         EstimateReadiness::kMissingOptions);

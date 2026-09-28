@@ -81,23 +81,40 @@ int main() {
 
   using latency::MultiplierTrialPhase;
   using latency::ResponsiveTrialReason;
-  CHECK(latency::ClassifyResponsiveTrialReason(true, 10000, 3000, 10000,
-                                                1000) ==
+  CHECK(latency::ClassifyResponsiveTrialReason(
+            true, 10000, 3000, 0, 10000, 8000, 1000) ==
         ResponsiveTrialReason::kDisplayOversubscription);
-  CHECK(latency::ClassifyResponsiveTrialReason(true, 10000, 0, 10000, 1000) ==
+  CHECK(latency::ClassifyResponsiveTrialReason(
+            true, 10000, 0, 0, 10000, 8000, 1000) ==
         ResponsiveTrialReason::kDisplayOversubscription);
-  CHECK(latency::ClassifyResponsiveTrialReason(false, 10000, 3000, 10000,
-                                                1000) ==
+  CHECK(latency::ClassifyResponsiveTrialReason(
+            false, 10000, 3000, 0, 10000, 8000, 1000) ==
         ResponsiveTrialReason::kRenderQueue);
-  CHECK(latency::ClassifyResponsiveTrialReason(false, 20000, 1000, 60000,
-                                                1000) ==
+  CHECK(latency::ClassifyResponsiveTrialReason(
+            false, 20000, 1000, 60000, 30000, 10000, 1000) ==
+        ResponsiveTrialReason::kHighInputLatency);
+  CHECK(latency::ClassifyResponsiveTrialReason(
+            false, 20000, 1000, 0, 60000, 10000, 1000) ==
         ResponsiveTrialReason::kHighPipelineLatency);
-  CHECK(latency::ClassifyResponsiveTrialReason(false, 20000, 1000, 59999,
-                                                4500) ==
-        ResponsiveTrialReason::kFrameGenerationWorkload);
-  CHECK(latency::ClassifyResponsiveTrialReason(false, 20000, 1000, 59999,
-                                                2500) ==
+  CHECK(latency::ClassifyResponsiveTrialReason(
+            false, 40000, 6170, 0, 55630, 39110, 5012) ==
+        ResponsiveTrialReason::kGpuSaturatedLatencyProxy);
+  CHECK(latency::ClassifyResponsiveTrialReason(
+            false, 40000, 6170, 55000, 55630, 39110, 5012) ==
         ResponsiveTrialReason::kNone);
+  CHECK(latency::ClassifyResponsiveTrialReason(
+            false, 20000, 1000, 0, 59999, 10000, 4500) ==
+        ResponsiveTrialReason::kFrameGenerationWorkload);
+  CHECK(latency::ClassifyResponsiveTrialReason(
+            false, 20000, 1000, 0, 49999, 10000, 2500) ==
+        ResponsiveTrialReason::kNone);
+
+  latency::MultiplierTrialSummary stable_baseline{
+      10000, 2000, 3000, 14000, 15000, 4000, 8};
+  latency::MultiplierTrialSummary faster_candidate{
+      8000, 1000, 1500, 12000, 14000, 3000, 8};
+  CHECK(latency::MultiplierTrialImproved(stable_baseline,
+                                         faster_candidate));
 
   const auto Sample = [](uint32_t interval, uint32_t queue,
                          uint32_t queue_p95, uint32_t pipeline,
@@ -183,6 +200,36 @@ int main() {
             now, 4, 4, 4, true, trigger,
             Sample(10000, 3000, 4000, 14000, 15000, 4500)) == 0);
   CHECK(apply_timeout.phase == MultiplierTrialPhase::kCooldown);
+
+  // A fixed-output cap may need one more Reflex submission after the live
+  // multiplier changes. Do not contaminate either eight-sample window while
+  // that cap is still being recomputed.
+  latency::MultiplierTrial cap_pending;
+  now = 0;
+  for (int index = 0; index < 4; ++index, now += 500)
+    cap_pending.Update(now, 5, 4, 4, true, trigger,
+                       Sample(10000, 3000, 4000, 14000, 15000, 4500), false);
+  CHECK(cap_pending.baseline_window.count == 0);
+  for (int index = 0; index < 8; ++index, now += 500)
+    cap_pending.Update(now, 5, 4, 4, true, trigger,
+                       Sample(10000, 3000, 4000, 14000, 15000, 4500), true);
+  CHECK(cap_pending.phase == MultiplierTrialPhase::kWaitingForCandidate);
+
+  // A baseline is valid only while the signal that justified it remains
+  // continuously present. Switching triggers restarts the eight-sample window.
+  latency::MultiplierTrial changing_trigger;
+  now = 0;
+  for (int index = 0; index < 4; ++index, now += 500)
+    changing_trigger.Update(
+        now, 6, 4, 4, true, ResponsiveTrialReason::kHighInputLatency,
+        Sample(10000, 0, 0, 65000, 67000, 1000));
+  CHECK(changing_trigger.baseline_window.count == 4);
+  changing_trigger.Update(
+      now, 6, 4, 4, true, ResponsiveTrialReason::kHighPipelineLatency,
+      Sample(10000, 0, 0, 65000, 67000, 1000));
+  CHECK(changing_trigger.baseline_window.count == 1 &&
+        changing_trigger.reason ==
+            ResponsiveTrialReason::kHighPipelineLatency);
 
   // 3x and 2x are monitor-only: automatic control never reduces them.
   latency::MultiplierTrial floor_trial;

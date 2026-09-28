@@ -64,6 +64,22 @@ inline constexpr uint32_t TargetFpsToFrameLimitUs(uint32_t target_fps) {
   return static_cast<uint32_t>((1000000ull + target_fps / 2u) / target_fps);
 }
 
+inline constexpr bool IsValidFixedOutputCap(uint32_t output_fps,
+                                            uint32_t multiplier) {
+  return output_fps >= 10 && output_fps <= 1000 &&
+         multiplier >= 2 && multiplier <= 6;
+}
+
+// A fixed-MFG output target is implemented through Reflex's source-frame
+// limiter. Keep the division in microseconds so targets such as 175 FPS at 3x
+// do not first collapse to an imprecise integer source-FPS value.
+inline constexpr uint32_t FixedOutputCapFrameLimitUs(uint32_t output_fps,
+                                                     uint32_t multiplier) {
+  if (!IsValidFixedOutputCap(output_fps, multiplier)) return 0;
+  const uint64_t numerator = uint64_t{1000000} * multiplier;
+  return static_cast<uint32_t>((numerator + output_fps - 1) / output_fps);
+}
+
 inline constexpr uint32_t FrameLimitUsToFps(uint32_t frame_limit_us) {
   if (frame_limit_us == 0) return 0;
   return static_cast<uint32_t>((1000000ull + frame_limit_us / 2u) /

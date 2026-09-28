@@ -41,6 +41,46 @@ int main() {
   CHECK(fc::internal::HookedReflexSetOptions(native)==sl::Result::eOk);
   CHECK(calls.size()==2 && calls[0]>0 && calls[1]==0);
   CHECK(!fc::g_reflex_limit_applied.load() && !fc::g_latency_guard_auto_cap_ready.load());
+
+  // A final-output target for fixed MFG is converted using the multiplier
+  // that is actually live, and a stricter native game limit is never relaxed.
+  reject_override=false; calls.clear();
+  fc::g_force_multiplier.store(4);
+  fc::g_latency_guard_live_multiplier.store(4);
+  fc::g_effective_request_seen.store(true);
+  fc::g_last_effective_generated.store(3);
+  fc::g_dynamic_applied.store(false);
+  fc::g_dynamic_mfg_enabled.store(false);
+  fc::g_fixed_output_fps_cap.store(200);
+  native.frameLimitUs=0;
+  CHECK(fc::internal::HookedReflexSetOptions(native)==sl::Result::eOk);
+  CHECK(calls.size()==1 && calls[0]==20000);
+  CHECK(fc::g_reflex_limit_source.load()==3 &&
+        fc::internal::FixedOutputCapReady());
+
+  calls.clear(); native.frameLimitUs=25000;
+  CHECK(fc::internal::HookedReflexSetOptions(native)==sl::Result::eOk);
+  CHECK(calls.size()==1 && calls[0]==25000);
+  CHECK(fc::g_reflex_limit_source.load()==3 &&
+        fc::internal::FixedOutputCapReady());
+
+  // The same saved final target follows a temporary 4x -> 3x latency trial.
+  calls.clear(); native.frameLimitUs=0;
+  fc::g_latency_guard_live_multiplier.store(3);
+  CHECK(fc::internal::HookedReflexSetOptions(native)==sl::Result::eOk);
+  CHECK(calls.size()==1 && calls[0]==15000);
+
+  // A saved Dynamic source-cap preference is dormant while Dynamic is not
+  // active and therefore cannot block or alter the fixed-multiplier guard.
+  calls.clear();
+  fc::g_fixed_output_fps_cap.store(0);
+  fc::g_dynamic_reflex_source_cap.store(true);
+  fc::g_dynamic_mfg_enabled.store(false);
+  CHECK(fc::internal::HookedReflexSetOptions(native)==sl::Result::eOk);
+  CHECK(calls.size()==1 && calls[0]==0 &&
+        fc::g_reflex_limit_source.load()==0);
+  fc::g_dynamic_reflex_source_cap.store(false);
+
   // Unknown extension must reach native exactly once, never be retained/replayed.
   sl::ReflexOptions extension; native.next=&extension; calls.clear();
   CHECK(fc::internal::HookedReflexSetOptions(native)==sl::Result::eOk);
