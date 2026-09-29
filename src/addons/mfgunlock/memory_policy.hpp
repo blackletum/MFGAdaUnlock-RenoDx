@@ -11,6 +11,17 @@
 
 namespace mfgunlock::memorypolicy {
 
+enum class GraphicsApi : uint32_t {
+  kUnknown = 0,
+  kD3D11,
+  kD3D12,
+  kVulkan,
+};
+
+inline constexpr bool SupportsDxgiBudget(GraphicsApi api) {
+  return api == GraphicsApi::kD3D11 || api == GraphicsApi::kD3D12;
+}
+
 enum class EstimateReadiness : uint32_t {
   kReady = 0,
   kMissingOptions,

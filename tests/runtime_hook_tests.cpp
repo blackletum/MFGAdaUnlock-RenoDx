@@ -16,6 +16,8 @@
   } while (false)
 
 namespace fc = mfgunlock::framecount;
+extern "C" __declspec(dllexport) void ReShadeLogMessage(void*, int,
+                                                         const char*) {}
 std::vector<unsigned int> requests;
 std::vector<sl::DLSSGMode> modes;
 unsigned int accepted_count = 1;
@@ -185,16 +187,22 @@ int main() {
   options.mode = sl::DLSSGMode::eOn;
   options.numFramesToGenerate = 1;
   accepted_count = 1;
+  fc::g_state_seen.store(true);
+  fc::g_max_actual_frames_presented.store(3);
   requests.clear();
   modes.clear();
   CHECK(fc::internal::HookedSetOptions(viewport, options) == sl::Result::eOk);
   CHECK((requests == std::vector<unsigned int>{1}));
   CHECK((modes == std::vector<sl::DLSSGMode>{sl::DLSSGMode::eOn}));
   CHECK(!fc::g_dynamic_applied.load());
+  CHECK(!fc::g_state_seen.load());
+  CHECK(fc::g_max_actual_frames_presented.load() == 0);
   state.structVersion = sl::kStructVersion2;
   CHECK(fc::internal::HookedGetState(viewport, state, nullptr) == sl::Result::eOk);
   CHECK(last_state_version == sl::kStructVersion2);
   CHECK(!fc::internal::g_get_state_reentry_seen.load());
+  CHECK(fc::g_state_seen.load());
+  CHECK(fc::g_max_actual_frames_presented.load() == 3);
 
   // Other games retain the established Dynamic v4 capability probe.
   fc::g_dynamic_game_compat_blocked.store(false);

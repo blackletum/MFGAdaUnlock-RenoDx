@@ -41,6 +41,79 @@ int main() {
   CHECK(fc::internal::HookedReflexSetOptions(native)==sl::Result::eOk);
   CHECK(calls.size()==2 && calls[0]>0 && calls[1]==0);
   CHECK(!fc::g_reflex_limit_applied.load() && !fc::g_latency_guard_auto_cap_ready.load());
+
+  // One direct source-FPS cap is shared by fixed and Dynamic MFG. Generated
+  // frames are not part of the requested Reflex rate, and a stricter native
+  // game limit is never relaxed.
+  reject_override=false; calls.clear();
+  fc::g_force_multiplier.store(4);
+  fc::g_latency_guard_live_multiplier.store(4);
+  fc::g_effective_request_seen.store(true);
+  fc::g_last_effective_generated.store(3);
+  fc::g_dynamic_applied.store(false);
+  fc::g_dynamic_mfg_enabled.store(false);
+  fc::g_reflex_source_fps_cap.store(120);
+  native.frameLimitUs=0;
+  CHECK(fc::internal::HookedReflexSetOptions(native)==sl::Result::eOk);
+  CHECK(calls.size()==1 && calls[0]==8333);
+  CHECK(fc::g_reflex_limit_source.load()==1 &&
+        fc::internal::UserSourceCapReady());
+  CHECK(fc::internal::ResolveUserSourceCapState().status ==
+        fc::internal::UserSourceCapStatus::kActive);
+
+  calls.clear(); native.frameLimitUs=10000;
+  CHECK(fc::internal::HookedReflexSetOptions(native)==sl::Result::eOk);
+  CHECK(calls.size()==1 && calls[0]==10000);
+  CHECK(fc::g_reflex_limit_source.load()==1 &&
+        fc::internal::UserSourceCapReady());
+  CHECK(fc::internal::ResolveUserSourceCapState().status ==
+        fc::internal::UserSourceCapStatus::kNativeLimitStricter);
+
+  // The complete 6x -> 5x -> 4x -> 3x trial keeps the exact same source
+  // interval. Refresh therefore detects identical forwarded options and does
+  // not call Reflex again for any multiplier step.
+  calls.clear(); native.frameLimitUs=0;
+  fc::g_force_multiplier.store(6);
+  fc::g_latency_guard_live_multiplier.store(6);
+  CHECK(fc::internal::HookedReflexSetOptions(native)==sl::Result::eOk);
+  CHECK(calls.size()==1 && calls[0]==8333);
+  for (uint32_t multiplier : {5u, 4u, 3u}) {
+    fc::g_latency_guard_live_multiplier.store(multiplier);
+    fc::internal::RefreshReflexTarget();
+    CHECK(calls.size()==1);
+  }
+
+  // Game-controlled fixed MFG is intentionally excluded; active Dynamic uses
+  // the same direct source cap without borrowing its output target value.
+  calls.clear();
+  fc::g_force_multiplier.store(0);
+  fc::g_dynamic_mfg_enabled.store(false);
+  CHECK(fc::internal::HookedReflexSetOptions(native)==sl::Result::eOk);
+  CHECK(calls.size()==1 && calls[0]==0 &&
+        fc::g_reflex_limit_source.load()==0);
+  CHECK(fc::internal::ResolveUserSourceCapState().status ==
+        fc::internal::UserSourceCapStatus::kInactiveGameControlled);
+  calls.clear();
+  fc::g_dynamic_mfg_enabled.store(true);
+  CHECK(fc::internal::ResolveUserSourceCapState().status ==
+        fc::internal::UserSourceCapStatus::kWaitingForDynamic);
+  fc::g_dynamic_applied.store(true);
+  CHECK(fc::internal::HookedReflexSetOptions(native)==sl::Result::eOk);
+  CHECK(calls.size()==1 && calls[0]==8333 &&
+        fc::g_reflex_limit_source.load()==1);
+
+  // Rejection retries the native options and remains visible in the shared
+  // status resolver instead of being mislabeled as merely pending.
+  calls.clear(); reject_override=true;
+  CHECK(fc::internal::HookedReflexSetOptions(native)==sl::Result::eOk);
+  CHECK(calls.size()==2 && calls[0]==8333 && calls[1]==0);
+  CHECK(fc::internal::ResolveUserSourceCapState().status ==
+        fc::internal::UserSourceCapStatus::kRejected);
+  reject_override=false;
+  fc::g_dynamic_applied.store(false);
+  fc::g_dynamic_mfg_enabled.store(false);
+  fc::g_reflex_source_fps_cap.store(0);
+
   // Unknown extension must reach native exactly once, never be retained/replayed.
   sl::ReflexOptions extension; native.next=&extension; calls.clear();
   CHECK(fc::internal::HookedReflexSetOptions(native)==sl::Result::eOk);
@@ -64,5 +137,36 @@ int main() {
   CHECK(fc::g_quality_resets_requested.load()==resets); // no per-frame history reset
   CHECK(fc::internal::HookedSetTagForFrame(f3,viewport,pair,1,nullptr)==sl::Result::eOk && nonnull==0);
   CHECK(fc::internal::HookedSetTagForFrame(f4,viewport,pair+1,1,nullptr)==sl::Result::eOk && nonnull==0);
+
+  // A simultaneous state transition must never block the tag submission
+  // thread. Optional HUD inputs fail closed while required inputs are left
+  // untouched, and the fallback is visible in diagnostics.
+  auto* quality_state = fc::internal::GetQualityState(viewport);
+  CHECK(quality_state != nullptr);
+  sl::ResourceTag contended_tags[] = {
+    pair[0], pair[1],
+    {&color, sl::kBufferTypeMotionVectors,
+     sl::ResourceLifecycle::eValidUntilPresent}};
+  const auto contentions = fc::g_quality_tag_lock_contentions.load();
+  AcquireSRWLockExclusive(&quality_state->lock);
+  CHECK(fc::internal::HookedSetTagForFrame(
+            f4, viewport, contended_tags, 3, nullptr) == sl::Result::eOk &&
+        nonnull == 1);
+  ReleaseSRWLockExclusive(&quality_state->lock);
+  CHECK(fc::g_quality_tag_lock_contentions.load() > contentions);
+
+  // More than the old eight-viewport limit must be tracked. The new bound is
+  // still finite and fails closed once genuinely exhausted.
+  for (uint32_t key = 100; key < 109; ++key)
+    CHECK(fc::internal::GetQualityState(sl::ViewportHandle(key)) != nullptr);
+  CHECK(fc::g_quality_viewport_count.load() > 8);
+  uint32_t next_key = 1000;
+  while (fc::g_quality_viewport_count.load() <
+         fc::kMaxQualityViewports) {
+    CHECK(fc::internal::GetQualityState(sl::ViewportHandle(next_key++)) !=
+          nullptr);
+  }
+  CHECK(fc::internal::GetQualityState(sl::ViewportHandle(next_key)) == nullptr);
+  CHECK(fc::g_quality_viewport_capacity_exhausted.load());
   std::cout << "Reflex replay and HUD frame-lifetime tests passed\n";
 }

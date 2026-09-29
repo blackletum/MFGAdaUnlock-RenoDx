@@ -31,18 +31,21 @@ int main() {
       ".reg .pred %p<260>;\n"
       "ld.param.u8 %rs8, [%rd6+220];\n";
   why.clear();
-  CHECK(internal::RewriteValidatedWarpBlend(blend, why));
+  CHECK(internal::RewriteValidatedWarpBlend(
+      blend, mfgunlock::adaptivequality::Profile::kStableV1, why));
   CHECK(blend.find("MFGUNLOCK_VALIDATED_WARP_BLEND_V1") != std::string::npos);
   CHECK(blend.find(".reg .pred %qv<7>;") != std::string::npos);
   CHECK(blend.find("0f3F59999A") != std::string::npos);
   CHECK(blend.find("ld.param.u8 %rs8, [%rd6+220];") != std::string::npos);
   g_refinement_enabled = true;
   std::string refined = ".entry Kernel_BlendCandidatesFused(\n.reg .pred %p<260>;\nld.param.u8 %rs8, [%rd6+220];\n";
-  CHECK(internal::RewriteValidatedWarpBlend(refined, why));
+  CHECK(internal::RewriteValidatedWarpBlend(
+      refined, mfgunlock::adaptivequality::Profile::kStableV1, why));
   CHECK(refined.find(mfgunlock::qualityrefinement::kBlendWeights) != std::string::npos);
   g_border_confidence_enabled = true;
   std::string border = ".entry Kernel_BlendCandidatesFused(\n.reg .pred %p<260>;\nld.param.u8 %rs8, [%rd6+220];\n";
-  CHECK(internal::RewriteValidatedWarpBlend(border, why));
+  CHECK(internal::RewriteValidatedWarpBlend(
+      border, mfgunlock::adaptivequality::Profile::kStableV1, why));
   CHECK(border.find(mfgunlock::qualityrefinement::kBlendWeights) != std::string::npos);
   CHECK(border.find(mfgunlock::qualityborder::kBorderWeights) != std::string::npos);
   CHECK(border.find("MFGUNLOCK_BORDER_CONFIDENCE_V1") != std::string::npos);
@@ -53,8 +56,11 @@ int main() {
   g_border_confidence_enabled = false;
   g_refinement_enabled = false;
   g_adaptive_quality_enabled = true;
+  g_adaptive_quality_profile =
+      mfgunlock::adaptivequality::Profile::kStableV1;
   std::string adaptive = ".entry Kernel_BlendCandidatesFused(\n.reg .pred %p<260>;\nld.param.u8 %rs8, [%rd6+220];\n";
-  CHECK(internal::RewriteValidatedWarpBlend(adaptive, why));
+  CHECK(internal::RewriteValidatedWarpBlend(
+      adaptive, mfgunlock::adaptivequality::Profile::kStableV1, why));
   CHECK(adaptive.find(mfgunlock::qualityrefinement::kBlendWeights) != std::string::npos);
   CHECK(adaptive.find(mfgunlock::qualityborder::kBorderWeights) != std::string::npos);
   CHECK(adaptive.find(mfgunlock::adaptivequality::kCandidateArbitration) != std::string::npos);
@@ -63,7 +69,26 @@ int main() {
         std::string::npos);
   CHECK(adaptive.find("selp.f32 %qf2, %qf1, %qf0, %qv2;") != std::string::npos);
   CHECK(adaptive.find("selp.f32 %qf3, %qf10, %qf8, %qv2;") != std::string::npos);
+
+  g_adaptive_quality_profile =
+      mfgunlock::adaptivequality::Profile::kFlickerReducedV2;
+  std::string adaptive_v2 = ".entry Kernel_BlendCandidatesFused(\n.reg .pred %p<260>;\nld.param.u8 %rs8, [%rd6+220];\n";
+  CHECK(internal::RewriteValidatedWarpBlend(
+      adaptive_v2,
+      mfgunlock::adaptivequality::Profile::kFlickerReducedV2, why));
+  CHECK(adaptive_v2.find("MFGUNLOCK_VALIDATED_WARP_BLEND_V2") !=
+        std::string::npos);
+  CHECK(adaptive_v2.find("MFGUNLOCK_SMOOTH_WARP_CONFIDENCE_V2") !=
+        std::string::npos);
+  CHECK(adaptive_v2.find("MFGUNLOCK_BORDER_CONFIDENCE_V2") !=
+        std::string::npos);
+  CHECK(adaptive_v2.find("MFGUNLOCK_CANDIDATE_ARBITRATION_V3") !=
+        std::string::npos);
+  CHECK(adaptive_v2.find("setp.ge.f32 %qv5, %f148, 0f3E4CCCCD;") ==
+        std::string::npos);
   g_adaptive_quality_enabled = false;
+  g_adaptive_quality_profile =
+      mfgunlock::adaptivequality::Profile::kStableV1;
 
   const float unchanged = mfgunlock::adaptivequality::ArbitrateExtraWeight(
       0.2f, 0.85f, 0.04f, 1.0f);

@@ -67,6 +67,8 @@ target_include_directories(force_policy_tests SYSTEM PRIVATE
 add_test(NAME force_policy_tests COMMAND force_policy_tests)
 add_executable(runtime_version_tests runtime_version_tests.cpp)
 add_test(NAME runtime_version_tests COMMAND runtime_version_tests)
+add_executable(validation_status_tests validation_status_tests.cpp)
+add_test(NAME validation_status_tests COMMAND validation_status_tests)
 add_executable(provider_probe provider_probe.cpp)
 target_compile_definitions(provider_probe PRIVATE NOMINMAX)
 target_include_directories(provider_probe SYSTEM PRIVATE
@@ -79,6 +81,8 @@ add_test(NAME blackwell_kernel_tests COMMAND blackwell_kernel_tests)
 add_executable(thin_geometry_tests thin_geometry_tests.cpp)
 target_compile_definitions(thin_geometry_tests PRIVATE NOMINMAX)
 add_test(NAME thin_geometry_tests COMMAND thin_geometry_tests)
+add_executable(adaptive_quality_v2_tests adaptive_quality_v2_tests.cpp)
+add_test(NAME adaptive_quality_v2_tests COMMAND adaptive_quality_v2_tests)
 find_program(POWERSHELL_EXECUTABLE NAMES powershell)
 if(POWERSHELL_EXECUTABLE)
   add_test(NAME capture_comparison COMMAND "${POWERSHELL_EXECUTABLE}" -NoProfile

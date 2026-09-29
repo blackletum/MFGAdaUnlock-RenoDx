@@ -64,10 +64,72 @@ inline constexpr uint32_t TargetFpsToFrameLimitUs(uint32_t target_fps) {
   return static_cast<uint32_t>((1000000ull + target_fps / 2u) / target_fps);
 }
 
+inline constexpr bool IsValidFixedOutputCap(uint32_t output_fps,
+                                            uint32_t multiplier) {
+  return output_fps >= 10 && output_fps <= 1000 &&
+         multiplier >= 2 && multiplier <= 6;
+}
+
+// A fixed-MFG output target is implemented through Reflex's source-frame
+// limiter. Keep the division in microseconds so targets such as 175 FPS at 3x
+// do not first collapse to an imprecise integer source-FPS value.
+inline constexpr uint32_t FixedOutputCapFrameLimitUs(uint32_t output_fps,
+                                                     uint32_t multiplier) {
+  if (!IsValidFixedOutputCap(output_fps, multiplier)) return 0;
+  const uint64_t numerator = uint64_t{1000000} * multiplier;
+  return static_cast<uint32_t>((numerator + output_fps - 1) / output_fps);
+}
+
 inline constexpr uint32_t FrameLimitUsToFps(uint32_t frame_limit_us) {
   if (frame_limit_us == 0) return 0;
   return static_cast<uint32_t>((1000000ull + frame_limit_us / 2u) /
                                frame_limit_us);
+}
+
+inline constexpr bool IsValidSourceFpsCap(uint32_t source_fps) {
+  return source_fps >= 10 && source_fps <= 1000;
+}
+
+enum class SourceCapConfigOrigin : uint32_t {
+  kNone = 0,
+  kConfigured,
+  kLegacyDynamic,
+  kLegacyFixedOutput,
+};
+
+struct SourceCapConfig {
+  uint32_t source_fps = 0;
+  SourceCapConfigOrigin origin = SourceCapConfigOrigin::kNone;
+};
+
+// Preserve the currently active meaning of the two experimental cap controls
+// without writing over their old keys. The new direct source-FPS key always
+// wins, including an explicit zero. If both legacy modes were configured, the
+// mode selected for this launch wins; a fixed value is otherwise preferred
+// because it can be converted exactly from its saved multiplier.
+inline constexpr SourceCapConfig ResolveSourceCapConfig(
+    bool current_key_present, uint32_t current_source_fps,
+    bool dynamic_configured, bool legacy_dynamic_cap,
+    uint32_t dynamic_target_fps, bool legacy_fixed_key_present,
+    uint32_t legacy_fixed_output_fps, uint32_t fixed_multiplier) {
+  if (current_key_present) {
+    return {IsValidSourceFpsCap(current_source_fps) ? current_source_fps : 0,
+            SourceCapConfigOrigin::kConfigured};
+  }
+  if (dynamic_configured && legacy_dynamic_cap &&
+      IsValidSourceFpsCap(dynamic_target_fps)) {
+    return {dynamic_target_fps, SourceCapConfigOrigin::kLegacyDynamic};
+  }
+  if (legacy_fixed_key_present &&
+      IsValidFixedOutputCap(legacy_fixed_output_fps, fixed_multiplier)) {
+    return {FrameLimitUsToFps(FixedOutputCapFrameLimitUs(
+                legacy_fixed_output_fps, fixed_multiplier)),
+            SourceCapConfigOrigin::kLegacyFixedOutput};
+  }
+  if (legacy_dynamic_cap && IsValidSourceFpsCap(dynamic_target_fps)) {
+    return {dynamic_target_fps, SourceCapConfigOrigin::kLegacyDynamic};
+  }
+  return {};
 }
 
 // Resolve the final-output target without pretending that DynamicTargetFPS is
@@ -211,13 +273,6 @@ inline constexpr bool ShouldTrialLowerMultiplier(
          configured_multiplier >= 3 && suggested_multiplier >= 2 &&
          suggested_multiplier < configured_multiplier &&
          source_oversubscribed && sustained_queue_pressure;
-}
-
-inline constexpr bool ShouldApplyReflexSourceCap(
-    bool dynamic_enabled, bool d3d12, bool support_seen, bool supported,
-    bool dynamic_applied, bool explicit_source_cap, uint32_t target_fps) {
-  return dynamic_enabled && d3d12 && support_seen && supported &&
-         dynamic_applied && explicit_source_cap && target_fps != 0;
 }
 
 }  // namespace mfgunlock::pacing

@@ -38,8 +38,10 @@ int main() {
   bool found_intermediate_scatter = false;
   bool found_silhouette_guard = false;
   bool found_aggressive_silhouette_guard = false;
-  bool found_adaptive_geometry = false;
-  bool found_adaptive_inpaint = false;
+  bool found_adaptive_geometry_v1 = false;
+  bool found_adaptive_geometry_v2 = false;
+  bool found_adaptive_inpaint_v1 = false;
+  bool found_adaptive_inpaint_v2 = false;
   for (const auto& replacement : generated_thin_geometry::kThinGeometryCubins) {
     CHECK(replacement.data != nullptr);
     CHECK(replacement.size != 0);
@@ -53,31 +55,59 @@ int main() {
           mechanism == "geometry_support_smooth_v2" ||
           mechanism == "geometry_motion_depth_aggressive" ||
           mechanism == "adaptive_quality_geometry_v1" ||
-          mechanism == "adaptive_inpaint_decision_v1");
+          mechanism == "adaptive_quality_geometry_v2" ||
+          mechanism == "adaptive_inpaint_decision_v1" ||
+          mechanism == "adaptive_inpaint_decision_v2");
     found_intermediate_scatter |= mechanism == "intermediate_scatter";
     found_silhouette_guard |= mechanism == "geometry_motion_depth";
     found_aggressive_silhouette_guard |=
         mechanism == "geometry_motion_depth_aggressive";
-    found_adaptive_geometry |=
+    found_adaptive_geometry_v1 |=
         mechanism == "adaptive_quality_geometry_v1";
-    found_adaptive_inpaint |=
+    found_adaptive_geometry_v2 |=
+        mechanism == "adaptive_quality_geometry_v2";
+    found_adaptive_inpaint_v1 |=
         mechanism == "adaptive_inpaint_decision_v1";
+    found_adaptive_inpaint_v2 |=
+        mechanism == "adaptive_inpaint_decision_v2";
+    uint64_t expected_v1_hash = 0;
+    if (mechanism == "intermediate_scatter")
+      expected_v1_hash = 0xecf671eec06ff322ull;
+    else if (mechanism == "adaptive_quality_geometry_v1")
+      expected_v1_hash = 0x0241ccccb649ec56ull;
+    else if (mechanism == "geometry_support_smooth_v2")
+      expected_v1_hash = 0xb67c7ea565188e88ull;
+    else if (mechanism == "geometry_motion_depth_refined")
+      expected_v1_hash = 0x30683efb17d8977eull;
+    else if (mechanism == "geometry_motion_depth")
+      expected_v1_hash = 0xa2b004394a535524ull;
+    else if (mechanism == "geometry_motion_depth_aggressive")
+      expected_v1_hash = 0x619062a7dc0707b5ull;
+    else if (mechanism == "adaptive_inpaint_decision_v1")
+      expected_v1_hash = 0xac072d063659e5e0ull;
+    if (expected_v1_hash != 0)
+      CHECK(internal::Fnv1a64(replacement.data, replacement.size) ==
+            expected_v1_hash);
     if (mechanism == "adaptive_quality_geometry_v1" ||
-        mechanism == "adaptive_inpaint_decision_v1") {
+        mechanism == "adaptive_quality_geometry_v2" ||
+        mechanism == "adaptive_inpaint_decision_v1" ||
+        mechanism == "adaptive_inpaint_decision_v2") {
       internal::ElfFingerprint compiled{};
       CHECK(internal::FingerprintElf(replacement.data, replacement.size,
                                      compiled));
       CHECK(compiled.shared == replacement.source_shared);
       CHECK(compiled.text <= replacement.source_text);
       CHECK(compiled.registers <=
-            (mechanism == "adaptive_quality_geometry_v1" ? 40u : 48u));
+            (mechanism.find("geometry") != std::string::npos ? 40u : 48u));
     }
   }
   CHECK(found_intermediate_scatter);
   CHECK(found_silhouette_guard);
   CHECK(found_aggressive_silhouette_guard);
-  CHECK(found_adaptive_geometry);
-  CHECK(found_adaptive_inpaint);
+  CHECK(found_adaptive_geometry_v1);
+  CHECK(found_adaptive_geometry_v2);
+  CHECK(found_adaptive_inpaint_v1);
+  CHECK(found_adaptive_inpaint_v2);
 #endif
 
   const mfgunlock::blackwell::Result defaults;
@@ -105,9 +135,17 @@ int main() {
   g_geometry_confidence_v2_enabled = false;
   g_refinement_enabled = false;
   g_adaptive_quality_enabled = true;
+  g_adaptive_quality_profile =
+      mfgunlock::adaptivequality::Profile::kStableV1;
   CHECK(std::string(SilhouetteGuardMechanism(SilhouetteGuardMode::Balanced)) ==
         "adaptive_quality_geometry_v1");
+  g_adaptive_quality_profile =
+      mfgunlock::adaptivequality::Profile::kFlickerReducedV2;
+  CHECK(std::string(SilhouetteGuardMechanism(SilhouetteGuardMode::Balanced)) ==
+        "adaptive_quality_geometry_v2");
   g_adaptive_quality_enabled = false;
+  g_adaptive_quality_profile =
+      mfgunlock::adaptivequality::Profile::kStableV1;
 
   std::cout << "blackwell kernel tests passed\n";
   return EXIT_SUCCESS;
