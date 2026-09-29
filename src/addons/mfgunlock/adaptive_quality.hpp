@@ -17,6 +17,8 @@ enum class Profile : uint32_t {
   kFlickerReducedV2 = 2,
 };
 
+inline constexpr Profile kDefaultProfile = Profile::kFlickerReducedV2;
+
 enum class ComponentVersion : uint32_t {
   kNative = 0,
   kV1 = 1,

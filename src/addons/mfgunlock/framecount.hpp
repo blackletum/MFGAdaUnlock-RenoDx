@@ -169,16 +169,12 @@ inline std::atomic_bool g_reflex_limit_applied{false};
 inline std::atomic<unsigned int> g_reflex_native_limit_us{0};
 inline std::atomic<unsigned int> g_reflex_effective_limit_us{0};
 inline std::atomic<unsigned int> g_reflex_limit_result{0};
+inline std::atomic_bool g_reflex_user_cap_rejected{false};
 inline std::atomic_bool g_reflex_limit_failure_logged{false};
-// A Reflex limiter controls application-rendered frames, not final displayed
-// frames. It therefore cannot enforce Dynamic MFG's output target while VSync
-// makes Streamline ignore dynamicTargetFrameRate. Keep it as an explicit
-// advanced source-frame cap instead of silently changing the game's limiter.
-inline std::atomic_bool g_dynamic_reflex_source_cap{false};
-// Desired final/output FPS for a fixed 2x..6x selection. The implementation
-// converts it to a Reflex source-frame interval for the multiplier that is
-// actually live. Zero leaves the game's native limiter untouched.
-inline std::atomic<unsigned int> g_fixed_output_fps_cap{0};
+// A single explicit Reflex limiter for application-rendered/source frames.
+// Generated frames are added afterwards, so this value never claims to be a
+// final/displayed-FPS target. Zero leaves the game's native limiter untouched.
+inline std::atomic<unsigned int> g_reflex_source_fps_cap{0};
 
 // Latency Guard is monitor-only by default, so existing users receive useful
 // diagnostics without any change to Reflex, pacing or multiplier selection.
@@ -243,8 +239,8 @@ inline std::atomic<unsigned int> g_latency_guard_clear_samples{0};
 inline std::atomic<unsigned int> g_latency_guard_candidate_cap_fps{0};
 inline std::atomic_bool g_latency_guard_refresh_pending{false};
 inline std::atomic<unsigned long long> g_latency_guard_ui_heartbeat_ms{0};
-// 0 = native/no addon policy, 1 = Dynamic explicit source cap,
-// 2 = Latency Guard queue trim, 3 = fixed-MFG final-output cap.
+// 0 = native/no addon policy, 1 = explicit user source cap,
+// 2 = Latency Guard queue trim.
 inline std::atomic<unsigned int> g_reflex_limit_source{0};
 
 enum class VramEstimateStatus : uint32_t {
@@ -582,9 +578,8 @@ struct ReflexCallScope {
 
 enum class ReflexTargetSource : unsigned int {
   kNative = 0,
-  kDynamicSourceCap = 1,
+  kUserSourceCap = 1,
   kLatencyGuard = 2,
-  kFixedOutputCap = 3,
 };
 
 struct ExplicitReflexTarget {
@@ -592,19 +587,7 @@ struct ExplicitReflexTarget {
   uint32_t limit_us = 0;
 };
 
-inline bool ShouldApplyDynamicReflexTarget() {
-  return pacing::ShouldApplyReflexSourceCap(
-      g_dynamic_mfg_enabled.load(std::memory_order_relaxed) &&
-          !g_dynamic_game_compat_blocked.load(std::memory_order_relaxed),
-      g_dynamic_d3d12.load(std::memory_order_relaxed),
-      g_dynamic_support_seen.load(std::memory_order_acquire),
-      g_dynamic_supported.load(std::memory_order_relaxed),
-      g_dynamic_applied.load(std::memory_order_relaxed),
-      g_dynamic_reflex_source_cap.load(std::memory_order_relaxed),
-      g_dynamic_target_fps.load(std::memory_order_relaxed));
-}
-
-inline uint32_t ActiveFixedMultiplierForCap() {
+inline uint32_t ActiveMultiplierForEstimate() {
   const uint32_t live =
       g_latency_guard_live_multiplier.load(std::memory_order_relaxed);
   if (forcepolicy::IsFixedMultiplier(live)) return live;
@@ -620,28 +603,22 @@ inline uint32_t ActiveFixedMultiplierForCap() {
   return g_force_multiplier.load(std::memory_order_relaxed);
 }
 
-inline bool FixedOutputCapRequested() {
-  const uint32_t multiplier = ActiveFixedMultiplierForCap();
+inline bool UserSourceCapRequested() {
+  const uint32_t cap =
+      g_reflex_source_fps_cap.load(std::memory_order_relaxed);
+  const bool fixed_selected = forcepolicy::IsFixedMultiplier(
+      g_force_multiplier.load(std::memory_order_relaxed));
   return g_addon_enabled.load(std::memory_order_relaxed) &&
-         !g_dynamic_applied.load(std::memory_order_relaxed) &&
-         forcepolicy::IsFixedMultiplier(
-             g_force_multiplier.load(std::memory_order_relaxed)) &&
-         pacing::IsValidFixedOutputCap(
-             g_fixed_output_fps_cap.load(std::memory_order_relaxed),
-             multiplier);
+         pacing::IsValidSourceFpsCap(cap) &&
+         (g_dynamic_applied.load(std::memory_order_relaxed) ||
+          fixed_selected);
 }
 
 inline ExplicitReflexTarget ResolveExplicitReflexTarget() {
-  if (ShouldApplyDynamicReflexTarget()) {
-    return {ReflexTargetSource::kDynamicSourceCap,
+  if (UserSourceCapRequested()) {
+    return {ReflexTargetSource::kUserSourceCap,
             pacing::TargetFpsToFrameLimitUs(
-                g_dynamic_target_fps.load(std::memory_order_relaxed))};
-  }
-  if (FixedOutputCapRequested()) {
-    return {ReflexTargetSource::kFixedOutputCap,
-            pacing::FixedOutputCapFrameLimitUs(
-                g_fixed_output_fps_cap.load(std::memory_order_relaxed),
-                ActiveFixedMultiplierForCap())};
+                g_reflex_source_fps_cap.load(std::memory_order_relaxed))};
   }
   return {};
 }
@@ -650,29 +627,96 @@ inline bool ShouldApplyExplicitReflexTarget() {
   return ResolveExplicitReflexTarget().source != ReflexTargetSource::kNative;
 }
 
-inline bool FixedOutputCapReady() {
-  if (!FixedOutputCapRequested()) return true;
-  const uint32_t requested = pacing::FixedOutputCapFrameLimitUs(
-      g_fixed_output_fps_cap.load(std::memory_order_relaxed),
-      ActiveFixedMultiplierForCap());
+inline bool UserSourceCapReady() {
+  if (!UserSourceCapRequested()) return true;
+  const uint32_t requested = pacing::TargetFpsToFrameLimitUs(
+      g_reflex_source_fps_cap.load(std::memory_order_relaxed));
   const uint32_t expected = pacing::PreserveStricterNativeLimit(
       g_reflex_native_limit_us.load(std::memory_order_relaxed), requested);
   return g_reflex_options_seen.load(std::memory_order_acquire) &&
          g_reflex_limit_result.load(std::memory_order_relaxed) ==
              static_cast<unsigned int>(sl::Result::eOk) &&
          g_reflex_limit_source.load(std::memory_order_relaxed) ==
-             static_cast<unsigned int>(ReflexTargetSource::kFixedOutputCap) &&
+             static_cast<unsigned int>(ReflexTargetSource::kUserSourceCap) &&
          g_reflex_effective_limit_us.load(std::memory_order_relaxed) == expected;
+}
+
+enum class UserSourceCapStatus : unsigned int {
+  kOff = 0,
+  kInactiveGameControlled,
+  kWaitingForDynamic,
+  kWaitingForReflex,
+  kPending,
+  kActive,
+  kNativeLimitStricter,
+  kRejected,
+};
+
+struct UserSourceCapState {
+  UserSourceCapStatus status = UserSourceCapStatus::kOff;
+  uint32_t configured_fps = 0;
+  uint32_t estimated_multiplier = 0;
+  uint32_t requested_limit_us = 0;
+  uint32_t native_limit_us = 0;
+  uint32_t effective_limit_us = 0;
+  bool requested = false;
+};
+
+inline UserSourceCapState ResolveUserSourceCapState() {
+  UserSourceCapState state{};
+  state.configured_fps =
+      g_reflex_source_fps_cap.load(std::memory_order_relaxed);
+  state.estimated_multiplier = ActiveMultiplierForEstimate();
+  state.requested_limit_us =
+      pacing::TargetFpsToFrameLimitUs(state.configured_fps);
+  state.native_limit_us =
+      g_reflex_native_limit_us.load(std::memory_order_relaxed);
+  state.effective_limit_us =
+      g_reflex_effective_limit_us.load(std::memory_order_relaxed);
+  if (!pacing::IsValidSourceFpsCap(state.configured_fps)) return state;
+
+  state.requested = UserSourceCapRequested();
+  if (!state.requested) {
+    const bool dynamic_waiting =
+        g_dynamic_mfg_enabled.load(std::memory_order_relaxed) &&
+        !g_dynamic_game_compat_blocked.load(std::memory_order_relaxed);
+    state.status = dynamic_waiting ? UserSourceCapStatus::kWaitingForDynamic
+                                   : UserSourceCapStatus::kInactiveGameControlled;
+    return state;
+  }
+  if (!g_reflex_options_seen.load(std::memory_order_acquire)) {
+    state.status = UserSourceCapStatus::kWaitingForReflex;
+    return state;
+  }
+  if (g_reflex_user_cap_rejected.load(std::memory_order_relaxed) ||
+      g_reflex_limit_result.load(std::memory_order_relaxed) !=
+      static_cast<unsigned int>(sl::Result::eOk)) {
+    state.status = UserSourceCapStatus::kRejected;
+    return state;
+  }
+  if (!UserSourceCapReady()) {
+    state.status = UserSourceCapStatus::kPending;
+    return state;
+  }
+  state.status = state.native_limit_us > state.requested_limit_us
+                     ? UserSourceCapStatus::kNativeLimitStricter
+                     : UserSourceCapStatus::kActive;
+  return state;
 }
 
 inline bool ShouldApplyLatencyGuardTarget() {
   return g_addon_enabled.load(std::memory_order_relaxed) &&
-         !FixedOutputCapRequested() &&
+         !UserSourceCapRequested() &&
          g_latency_guard_mode.load(std::memory_order_relaxed) ==
              static_cast<unsigned int>(pacing::LatencyGuardMode::kAutomatic) &&
          g_latency_guard_auto_cap_ready.load(std::memory_order_acquire) &&
          g_latency_guard_active_source_cap_fps.load(
              std::memory_order_relaxed) != 0;
+}
+
+inline bool ShouldKeepAddonReflexTarget() {
+  return ShouldApplyExplicitReflexTarget() ||
+         ShouldApplyLatencyGuardTarget();
 }
 
 inline bool DynamicVersionStackReady() {
@@ -724,11 +768,8 @@ inline sl::Result SubmitReflexOptions(const sl::ReflexOptions& native_options, b
   const bool apply_latency_guard =
       !apply_explicit_target && ShouldApplyLatencyGuardTarget();
   if (apply_explicit_target) {
-    forwarded.frameLimitUs =
-        explicit_target.source == ReflexTargetSource::kFixedOutputCap
-            ? pacing::PreserveStricterNativeLimit(
-                  native_options.frameLimitUs, explicit_target.limit_us)
-            : explicit_target.limit_us;
+    forwarded.frameLimitUs = pacing::PreserveStricterNativeLimit(
+        native_options.frameLimitUs, explicit_target.limit_us);
   } else if (apply_latency_guard) {
     const uint32_t guard_limit_us = pacing::TargetFpsToFrameLimitUs(
         g_latency_guard_active_source_cap_fps.load(
@@ -745,6 +786,9 @@ inline sl::Result SubmitReflexOptions(const sl::ReflexOptions& native_options, b
       g_last_accepted_reflex_epoch == epoch &&
       SameReflexOptions(forwarded, g_last_accepted_reflex_options)) return sl::Result::eOk;
   sl::Result result = real(forwarded);
+  const bool user_cap_rejected = apply_explicit_target &&
+      result != sl::Result::eOk &&
+      forwarded.frameLimitUs != native_options.frameLimitUs;
   if (result != sl::Result::eOk && forwarded.frameLimitUs != native_options.frameLimitUs) {
     // A rejected override is not proof that native state was preserved.
     // Retry once at the same serialized call boundary, without an override.
@@ -773,6 +817,10 @@ inline sl::Result SubmitReflexOptions(const sl::ReflexOptions& native_options, b
     g_reflex_effective_limit_us.store(forwarded.frameLimitUs, std::memory_order_relaxed);
   g_reflex_limit_result.store(static_cast<unsigned int>(result),
                               std::memory_order_relaxed);
+  if (apply_explicit_target) {
+    g_reflex_user_cap_rejected.store(user_cap_rejected,
+                                     std::memory_order_relaxed);
+  }
   const bool apply_target = override_accepted;
   const unsigned int new_source =
       result == sl::Result::eOk
@@ -792,11 +840,8 @@ inline sl::Result SubmitReflexOptions(const sl::ReflexOptions& native_options, b
       (!was_applied || previous_source != new_source)) {
     g_reflex_limit_failure_logged.store(false, std::memory_order_relaxed);
     std::stringstream s;
-    const char* source_name = guard_changes_limit
-        ? "Latency Guard"
-        : (explicit_target.source == ReflexTargetSource::kFixedOutputCap
-               ? "fixed-output"
-               : "advanced Dynamic");
+    const char* source_name =
+        guard_changes_limit ? "Latency Guard" : "user";
     s << "mfgunlock: " << source_name
       << " Reflex source-frame cap applied ("
       << native_options.frameLimitUs << " us -> " << forwarded.frameLimitUs
@@ -1144,7 +1189,7 @@ inline sl::Result CallSetOptions(const sl::ViewportHandle& viewport,
       // Configuration changes originate on the overlay thread, but
       // Streamline/Reflex calls belong on the game's own submission thread.
       // Restore a previously overridden source cap only at this safe boundary.
-      if (!g_dynamic_mfg_enabled.load(std::memory_order_relaxed) &&
+      if (!ShouldKeepAddonReflexTarget() &&
           g_reflex_limit_applied.load(std::memory_order_acquire)) {
         RefreshReflexTarget();
       }
@@ -1218,7 +1263,7 @@ inline sl::Result CallSetOptions(const sl::ViewportHandle& viewport,
       g_dynamic_change_pending.store(false, std::memory_order_release);
     if (!g_dynamic_mfg_enabled.load(std::memory_order_relaxed))
       g_dynamic_change_pending.store(false, std::memory_order_release);
-    if (!g_dynamic_mfg_enabled.load(std::memory_order_relaxed) &&
+    if (!ShouldKeepAddonReflexTarget() &&
         g_reflex_limit_applied.load(std::memory_order_acquire)) {
       RefreshReflexTarget();
     }
@@ -2285,6 +2330,7 @@ inline void NotifySwapchainTransition() {
                                                    std::memory_order_relaxed);
   g_latency_guard_sample_seen.store(false, std::memory_order_release);
   g_latency_guard_trial_blocker.store(0, std::memory_order_relaxed);
+  g_reflex_user_cap_rejected.store(false, std::memory_order_relaxed);
   g_latency_guard_timing_confident.store(false, std::memory_order_relaxed);
   g_latency_guard_queue_timing_confident.store(false,
                                                 std::memory_order_relaxed);
@@ -2336,7 +2382,15 @@ inline void NotifyFixedMultiplierChanged(unsigned int) {
   g_force_failed_for.store(0, std::memory_order_relaxed);
   g_latency_guard_multiplier_override.store(0, std::memory_order_release);
   g_latency_guard_epoch.fetch_add(1, std::memory_order_acq_rel);
-  g_latency_guard_refresh_pending.store(true, std::memory_order_release);
+  const bool source_cap_should_apply = internal::UserSourceCapRequested();
+  const bool source_cap_active =
+      g_reflex_limit_source.load(std::memory_order_relaxed) ==
+      static_cast<unsigned int>(
+          internal::ReflexTargetSource::kUserSourceCap);
+  if (source_cap_should_apply != source_cap_active) {
+    g_reflex_user_cap_rejected.store(false, std::memory_order_relaxed);
+    g_latency_guard_refresh_pending.store(true, std::memory_order_release);
+  }
   // Both selecting a fixed value and returning control to the game take effect
   // only on the next enabled game-side SetOptions call.
   g_fixed_override_status.store(
@@ -2353,6 +2407,7 @@ inline void NotifyDynamicModeChanged() {
   g_dynamic_state_probe_failures.store(0, std::memory_order_relaxed);
   g_dynamic_change_pending.store(true, std::memory_order_release);
   g_latency_guard_refresh_pending.store(true, std::memory_order_release);
+  g_reflex_user_cap_rejected.store(false, std::memory_order_relaxed);
   g_reflex_limit_failure_logged.store(false, std::memory_order_relaxed);
   g_effective_request_seen.store(false, std::memory_order_release);
   g_fixed_override_status.store(
@@ -2365,8 +2420,9 @@ inline void NotifyDynamicModeChanged() {
   internal::RequestAllResets();
 }
 
-inline void NotifyFixedOutputCapChanged() {
+inline void NotifySourceFpsCapChanged() {
   g_reflex_limit_failure_logged.store(false, std::memory_order_relaxed);
+  g_reflex_user_cap_rejected.store(false, std::memory_order_relaxed);
   g_latency_guard_epoch.fetch_add(1, std::memory_order_acq_rel);
   g_latency_guard_refresh_pending.store(true, std::memory_order_release);
 }

@@ -47,12 +47,41 @@ int main() {
   CHECK(FixedOutputCapFrameLimitUs(175, 3) == 17143);
   CHECK(FixedOutputCapFrameLimitUs(240, 0) == 0);
 
-  using mfgunlock::pacing::ShouldApplyReflexSourceCap;
-  CHECK(!ShouldApplyReflexSourceCap(true, true, true, true, true, false, 100));
-  CHECK(ShouldApplyReflexSourceCap(true, true, true, true, true, true, 100));
-  CHECK(!ShouldApplyReflexSourceCap(true, true, true, true, true, true, 0));
-  CHECK(!ShouldApplyReflexSourceCap(true, false, true, true, true, true, 100));
-  CHECK(!ShouldApplyReflexSourceCap(true, true, true, false, true, true, 100));
+  using mfgunlock::pacing::IsValidSourceFpsCap;
+  using mfgunlock::pacing::ResolveSourceCapConfig;
+  using mfgunlock::pacing::SourceCapConfigOrigin;
+  CHECK(!IsValidSourceFpsCap(0));
+  CHECK(!IsValidSourceFpsCap(9));
+  CHECK(IsValidSourceFpsCap(10));
+  CHECK(IsValidSourceFpsCap(120));
+  CHECK(IsValidSourceFpsCap(1000));
+  CHECK(!IsValidSourceFpsCap(1001));
+  const auto direct_off = ResolveSourceCapConfig(
+      true, 0, true, true, 165, true, 120, 4);
+  CHECK(direct_off.source_fps == 0 &&
+        direct_off.origin == SourceCapConfigOrigin::kConfigured);
+  const auto direct = ResolveSourceCapConfig(
+      true, 120, false, false, 0, false, 0, 0);
+  CHECK(direct.source_fps == 120 &&
+        direct.origin == SourceCapConfigOrigin::kConfigured);
+  const auto invalid_direct_wins = ResolveSourceCapConfig(
+      true, 1001, true, true, 165, true, 120, 4);
+  CHECK(invalid_direct_wins.source_fps == 0 &&
+        invalid_direct_wins.origin == SourceCapConfigOrigin::kConfigured);
+  const auto legacy_dynamic = ResolveSourceCapConfig(
+      false, 0, true, true, 165, true, 120, 4);
+  CHECK(legacy_dynamic.source_fps == 165 &&
+        legacy_dynamic.origin == SourceCapConfigOrigin::kLegacyDynamic);
+  const auto legacy_fixed = ResolveSourceCapConfig(
+      false, 0, false, false, 0, true, 120, 4);
+  CHECK(legacy_fixed.source_fps == 30 &&
+        legacy_fixed.origin == SourceCapConfigOrigin::kLegacyFixedOutput);
+  const auto dormant_dynamic = ResolveSourceCapConfig(
+      false, 0, false, true, 144, false, 0, 0);
+  CHECK(dormant_dynamic.source_fps == 144 &&
+        dormant_dynamic.origin == SourceCapConfigOrigin::kLegacyDynamic);
+  CHECK(ResolveSourceCapConfig(false, 0, false, false, 0, true, 120, 0)
+            .source_fps == 0);
 
   using mfgunlock::pacing::BuildLatencyGuardRecommendation;
   using mfgunlock::pacing::FrameLimitUsToFps;

@@ -93,8 +93,8 @@ enum class ResponsiveTrialBlocker : uint32_t {
   kFixedMultiplierRequired,
   kLiveMultiplierUnconfirmed,
   kReflexOptionsUnavailable,
-  kConflictingDynamicCap,
-  kFixedCapPending,
+  kUserCapPending,
+  kUserCapRejected,
   kNoTrigger,
 };
 

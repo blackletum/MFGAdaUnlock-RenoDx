@@ -42,8 +42,9 @@ int main() {
   CHECK(calls.size()==2 && calls[0]>0 && calls[1]==0);
   CHECK(!fc::g_reflex_limit_applied.load() && !fc::g_latency_guard_auto_cap_ready.load());
 
-  // A final-output target for fixed MFG is converted using the multiplier
-  // that is actually live, and a stricter native game limit is never relaxed.
+  // One direct source-FPS cap is shared by fixed and Dynamic MFG. Generated
+  // frames are not part of the requested Reflex rate, and a stricter native
+  // game limit is never relaxed.
   reject_override=false; calls.clear();
   fc::g_force_multiplier.store(4);
   fc::g_latency_guard_live_multiplier.store(4);
@@ -51,35 +52,67 @@ int main() {
   fc::g_last_effective_generated.store(3);
   fc::g_dynamic_applied.store(false);
   fc::g_dynamic_mfg_enabled.store(false);
-  fc::g_fixed_output_fps_cap.store(200);
+  fc::g_reflex_source_fps_cap.store(120);
   native.frameLimitUs=0;
   CHECK(fc::internal::HookedReflexSetOptions(native)==sl::Result::eOk);
-  CHECK(calls.size()==1 && calls[0]==20000);
-  CHECK(fc::g_reflex_limit_source.load()==3 &&
-        fc::internal::FixedOutputCapReady());
+  CHECK(calls.size()==1 && calls[0]==8333);
+  CHECK(fc::g_reflex_limit_source.load()==1 &&
+        fc::internal::UserSourceCapReady());
+  CHECK(fc::internal::ResolveUserSourceCapState().status ==
+        fc::internal::UserSourceCapStatus::kActive);
 
-  calls.clear(); native.frameLimitUs=25000;
+  calls.clear(); native.frameLimitUs=10000;
   CHECK(fc::internal::HookedReflexSetOptions(native)==sl::Result::eOk);
-  CHECK(calls.size()==1 && calls[0]==25000);
-  CHECK(fc::g_reflex_limit_source.load()==3 &&
-        fc::internal::FixedOutputCapReady());
+  CHECK(calls.size()==1 && calls[0]==10000);
+  CHECK(fc::g_reflex_limit_source.load()==1 &&
+        fc::internal::UserSourceCapReady());
+  CHECK(fc::internal::ResolveUserSourceCapState().status ==
+        fc::internal::UserSourceCapStatus::kNativeLimitStricter);
 
-  // The same saved final target follows a temporary 4x -> 3x latency trial.
+  // The complete 6x -> 5x -> 4x -> 3x trial keeps the exact same source
+  // interval. Refresh therefore detects identical forwarded options and does
+  // not call Reflex again for any multiplier step.
   calls.clear(); native.frameLimitUs=0;
-  fc::g_latency_guard_live_multiplier.store(3);
+  fc::g_force_multiplier.store(6);
+  fc::g_latency_guard_live_multiplier.store(6);
   CHECK(fc::internal::HookedReflexSetOptions(native)==sl::Result::eOk);
-  CHECK(calls.size()==1 && calls[0]==15000);
+  CHECK(calls.size()==1 && calls[0]==8333);
+  for (uint32_t multiplier : {5u, 4u, 3u}) {
+    fc::g_latency_guard_live_multiplier.store(multiplier);
+    fc::internal::RefreshReflexTarget();
+    CHECK(calls.size()==1);
+  }
 
-  // A saved Dynamic source-cap preference is dormant while Dynamic is not
-  // active and therefore cannot block or alter the fixed-multiplier guard.
+  // Game-controlled fixed MFG is intentionally excluded; active Dynamic uses
+  // the same direct source cap without borrowing its output target value.
   calls.clear();
-  fc::g_fixed_output_fps_cap.store(0);
-  fc::g_dynamic_reflex_source_cap.store(true);
+  fc::g_force_multiplier.store(0);
   fc::g_dynamic_mfg_enabled.store(false);
   CHECK(fc::internal::HookedReflexSetOptions(native)==sl::Result::eOk);
   CHECK(calls.size()==1 && calls[0]==0 &&
         fc::g_reflex_limit_source.load()==0);
-  fc::g_dynamic_reflex_source_cap.store(false);
+  CHECK(fc::internal::ResolveUserSourceCapState().status ==
+        fc::internal::UserSourceCapStatus::kInactiveGameControlled);
+  calls.clear();
+  fc::g_dynamic_mfg_enabled.store(true);
+  CHECK(fc::internal::ResolveUserSourceCapState().status ==
+        fc::internal::UserSourceCapStatus::kWaitingForDynamic);
+  fc::g_dynamic_applied.store(true);
+  CHECK(fc::internal::HookedReflexSetOptions(native)==sl::Result::eOk);
+  CHECK(calls.size()==1 && calls[0]==8333 &&
+        fc::g_reflex_limit_source.load()==1);
+
+  // Rejection retries the native options and remains visible in the shared
+  // status resolver instead of being mislabeled as merely pending.
+  calls.clear(); reject_override=true;
+  CHECK(fc::internal::HookedReflexSetOptions(native)==sl::Result::eOk);
+  CHECK(calls.size()==2 && calls[0]==8333 && calls[1]==0);
+  CHECK(fc::internal::ResolveUserSourceCapState().status ==
+        fc::internal::UserSourceCapStatus::kRejected);
+  reject_override=false;
+  fc::g_dynamic_applied.store(false);
+  fc::g_dynamic_mfg_enabled.store(false);
+  fc::g_reflex_source_fps_cap.store(0);
 
   // Unknown extension must reach native exactly once, never be retained/replayed.
   sl::ReflexOptions extension; native.next=&extension; calls.clear();

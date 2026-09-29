@@ -86,6 +86,52 @@ inline constexpr uint32_t FrameLimitUsToFps(uint32_t frame_limit_us) {
                                frame_limit_us);
 }
 
+inline constexpr bool IsValidSourceFpsCap(uint32_t source_fps) {
+  return source_fps >= 10 && source_fps <= 1000;
+}
+
+enum class SourceCapConfigOrigin : uint32_t {
+  kNone = 0,
+  kConfigured,
+  kLegacyDynamic,
+  kLegacyFixedOutput,
+};
+
+struct SourceCapConfig {
+  uint32_t source_fps = 0;
+  SourceCapConfigOrigin origin = SourceCapConfigOrigin::kNone;
+};
+
+// Preserve the currently active meaning of the two experimental cap controls
+// without writing over their old keys. The new direct source-FPS key always
+// wins, including an explicit zero. If both legacy modes were configured, the
+// mode selected for this launch wins; a fixed value is otherwise preferred
+// because it can be converted exactly from its saved multiplier.
+inline constexpr SourceCapConfig ResolveSourceCapConfig(
+    bool current_key_present, uint32_t current_source_fps,
+    bool dynamic_configured, bool legacy_dynamic_cap,
+    uint32_t dynamic_target_fps, bool legacy_fixed_key_present,
+    uint32_t legacy_fixed_output_fps, uint32_t fixed_multiplier) {
+  if (current_key_present) {
+    return {IsValidSourceFpsCap(current_source_fps) ? current_source_fps : 0,
+            SourceCapConfigOrigin::kConfigured};
+  }
+  if (dynamic_configured && legacy_dynamic_cap &&
+      IsValidSourceFpsCap(dynamic_target_fps)) {
+    return {dynamic_target_fps, SourceCapConfigOrigin::kLegacyDynamic};
+  }
+  if (legacy_fixed_key_present &&
+      IsValidFixedOutputCap(legacy_fixed_output_fps, fixed_multiplier)) {
+    return {FrameLimitUsToFps(FixedOutputCapFrameLimitUs(
+                legacy_fixed_output_fps, fixed_multiplier)),
+            SourceCapConfigOrigin::kLegacyFixedOutput};
+  }
+  if (legacy_dynamic_cap && IsValidSourceFpsCap(dynamic_target_fps)) {
+    return {dynamic_target_fps, SourceCapConfigOrigin::kLegacyDynamic};
+  }
+  return {};
+}
+
 // Resolve the final-output target without pretending that DynamicTargetFPS is
 // authoritative under VSync. Streamline 2.14.1 follows the active display in
 // that case. The driver-observed target is a fallback for integrations where
@@ -227,13 +273,6 @@ inline constexpr bool ShouldTrialLowerMultiplier(
          configured_multiplier >= 3 && suggested_multiplier >= 2 &&
          suggested_multiplier < configured_multiplier &&
          source_oversubscribed && sustained_queue_pressure;
-}
-
-inline constexpr bool ShouldApplyReflexSourceCap(
-    bool dynamic_enabled, bool d3d12, bool support_seen, bool supported,
-    bool dynamic_applied, bool explicit_source_cap, uint32_t target_fps) {
-  return dynamic_enabled && d3d12 && support_seen && supported &&
-         dynamic_applied && explicit_source_cap && target_fps != 0;
 }
 
 }  // namespace mfgunlock::pacing

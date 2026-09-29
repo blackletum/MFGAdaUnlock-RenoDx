@@ -1,4 +1,5 @@
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
 #include <iostream>
 #include <limits>
@@ -15,11 +16,31 @@
     }                                                                           \
   } while (false)
 
+constexpr uint64_t Fnv1a64(const char* text) {
+  uint64_t hash = UINT64_C(14695981039346656037);
+  while (*text != '\0') {
+    hash ^= static_cast<unsigned char>(*text++);
+    hash *= UINT64_C(1099511628211);
+  }
+  return hash;
+}
+
 int main() {
   namespace aq = mfgunlock::adaptivequality;
   namespace aq2 = mfgunlock::adaptivequalityv2;
 
+  // Release-candidate payload fingerprints. These intentionally freeze the
+  // user-validated endpoint fast paths (14-register synthetic V2 allocation)
+  // so later UI/latency work cannot silently change visual PTX.
+  CHECK(Fnv1a64(aq2::kSmoothWarpConfidence) ==
+        UINT64_C(0x66abc7e3a697a65f));
+  CHECK(Fnv1a64(aq2::kBorderConfidence) ==
+        UINT64_C(0x2adb5a0dd7cdf2e2));
+  CHECK(Fnv1a64(aq2::kCandidateArbitration) ==
+        UINT64_C(0xb0e724b196e70779));
+
   CHECK(aq::NormalizeProfile(0) == aq::Profile::kStableV1);
+  CHECK(aq::kDefaultProfile == aq::Profile::kFlickerReducedV2);
   CHECK(aq::NormalizeProfile(1) == aq::Profile::kStableV1);
   CHECK(aq::NormalizeProfile(2) == aq::Profile::kFlickerReducedV2);
   CHECK(aq::NormalizeProfile(999) == aq::Profile::kStableV1);

@@ -201,9 +201,8 @@ int main() {
             Sample(10000, 3000, 4000, 14000, 15000, 4500)) == 0);
   CHECK(apply_timeout.phase == MultiplierTrialPhase::kCooldown);
 
-  // A fixed-output cap may need one more Reflex submission after the live
-  // multiplier changes. Do not contaminate either eight-sample window while
-  // that cap is still being recomputed.
+  // An explicit source cap must be confirmed once before the baseline starts.
+  // After that initial application it remains ready across multiplier steps.
   latency::MultiplierTrial cap_pending;
   now = 0;
   for (int index = 0; index < 4; ++index, now += 500)

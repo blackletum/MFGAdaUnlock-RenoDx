@@ -151,11 +151,12 @@ std::atomic_bool g_configured_quality_refinement{false};
 std::atomic_bool g_adaptive_quality{true};
 std::atomic_bool g_configured_adaptive_quality{true};
 std::atomic<unsigned int> g_adaptive_quality_profile{
-    static_cast<unsigned int>(
-        mfgunlock::adaptivequality::Profile::kStableV1)};
+    static_cast<unsigned int>(mfgunlock::adaptivequality::kDefaultProfile)};
 std::atomic<unsigned int> g_configured_adaptive_quality_profile{
+    static_cast<unsigned int>(mfgunlock::adaptivequality::kDefaultProfile)};
+std::atomic<unsigned int> g_source_cap_config_origin{
     static_cast<unsigned int>(
-        mfgunlock::adaptivequality::Profile::kStableV1)};
+        mfgunlock::pacing::SourceCapConfigOrigin::kNone)};
 // Research-only attenuation of the refinement's extra blend weight near the
 // screen boundary. Never changes the provider's native candidate weight.
 std::atomic_bool g_border_confidence{false};
@@ -2297,14 +2298,19 @@ void UpdateLatencyGuard(reshade::api::swapchain* swapchain) {
   const unsigned int current_limit_source =
       mfgunlock::framecount::g_reflex_limit_source.load(
           std::memory_order_relaxed);
-  const bool fixed_output_cap_requested =
-      mfgunlock::framecount::internal::FixedOutputCapRequested();
-  const bool fixed_output_cap_ready =
-      mfgunlock::framecount::internal::FixedOutputCapReady();
-  if (fixed_output_cap_requested && !fixed_output_cap_ready) {
-    // A multiplier transition changes the source interval needed to preserve
-    // the same final-output target. Replay only at the established safe Reflex
-    // boundary; samples stay out of the trial until that cap is confirmed.
+  const auto user_source_cap_state =
+      mfgunlock::framecount::internal::ResolveUserSourceCapState();
+  const bool user_source_cap_requested = user_source_cap_state.requested;
+  const bool user_source_cap_ready =
+      mfgunlock::framecount::internal::UserSourceCapReady();
+  const bool user_source_cap_rejected =
+      user_source_cap_state.status ==
+      mfgunlock::framecount::internal::UserSourceCapStatus::kRejected;
+  if (user_source_cap_requested && !user_source_cap_ready &&
+      !user_source_cap_rejected) {
+    // Apply the direct source cap once at the established safe Reflex
+    // boundary. It is invariant across multiplier trials, so later 6x->5x->
+    // 4x->3x transitions never need another Reflex replay.
     mfgunlock::framecount::g_latency_guard_refresh_pending.store(
         true, std::memory_order_release);
     mfgunlock::framecount::internal::RefreshReflexTarget();
@@ -2315,8 +2321,6 @@ void UpdateLatencyGuard(reshade::api::swapchain* swapchain) {
       observation.sleep.game_sleep &&
       !observation.sleep.dynamic_frame_generation_control &&
       !mfgunlock::framecount::g_dynamic_applied.load(std::memory_order_relaxed) &&
-      current_limit_source != static_cast<unsigned int>(
-          mfgunlock::framecount::internal::ReflexTargetSource::kDynamicSourceCap) &&
       mfgunlock::framecount::g_reflex_options_seen.load(std::memory_order_acquire) &&
       mfgunlock::forcepolicy::IsFixedMultiplier(configured_multiplier);
   const uint32_t old_multiplier_override =
@@ -2362,12 +2366,10 @@ void UpdateLatencyGuard(reshade::api::swapchain* swapchain) {
   } else if (!mfgunlock::framecount::g_reflex_options_seen.load(
                  std::memory_order_acquire)) {
     trial_blocker = ResponsiveTrialBlocker::kReflexOptionsUnavailable;
-  } else if (current_limit_source == static_cast<unsigned int>(
-                 mfgunlock::framecount::internal::ReflexTargetSource::
-                     kDynamicSourceCap)) {
-    trial_blocker = ResponsiveTrialBlocker::kConflictingDynamicCap;
-  } else if (fixed_output_cap_requested && !fixed_output_cap_ready) {
-    trial_blocker = ResponsiveTrialBlocker::kFixedCapPending;
+  } else if (user_source_cap_rejected) {
+    trial_blocker = ResponsiveTrialBlocker::kUserCapRejected;
+  } else if (user_source_cap_requested && !user_source_cap_ready) {
+    trial_blocker = ResponsiveTrialBlocker::kUserCapPending;
   } else if (responsive_reason ==
              mfgunlock::latency::ResponsiveTrialReason::kNone) {
     trial_blocker = ResponsiveTrialBlocker::kNoTrigger;
@@ -2386,7 +2388,7 @@ void UpdateLatencyGuard(reshade::api::swapchain* swapchain) {
       mfgunlock::framecount::g_latency_guard_epoch.load(
           std::memory_order_acquire),
       configured_multiplier, live_multiplier, multiplier_safe,
-      responsive_reason, multiplier_sample, fixed_output_cap_ready);
+      responsive_reason, multiplier_sample, user_source_cap_ready);
   mfgunlock::framecount::g_latency_guard_multiplier_override.store(
       multiplier_override, std::memory_order_release);
   mfgunlock::framecount::g_latency_guard_multiplier_trial_accepted.store(
@@ -2424,14 +2426,10 @@ void UpdateLatencyGuard(reshade::api::swapchain* swapchain) {
       std::memory_order_relaxed);
   if (old_multiplier_override != multiplier_override) {
     // The next normal game SetOptions submission picks up (or releases) the
-    // bounded runtime override. Never call Streamline from Present.
+    // bounded runtime override. The direct source-FPS cap is unchanged, so do
+    // not replay Reflex or add a second reconfiguration at this transition.
     mfgunlock::framecount::g_force_failed_for.store(0,
                                                     std::memory_order_relaxed);
-    if (fixed_output_cap_requested) {
-      mfgunlock::framecount::g_latency_guard_refresh_pending.store(
-          true, std::memory_order_release);
-      mfgunlock::framecount::internal::RefreshReflexTarget();
-    }
   }
   const bool multiplier_fallback_allowed = multiplier_override == 0 &&
       multiplier_trial.attempted &&
@@ -2443,7 +2441,7 @@ void UpdateLatencyGuard(reshade::api::swapchain* swapchain) {
       multiplier_trial.phase !=
           mfgunlock::latency::MultiplierTrialPhase::kCooldown;
   const bool queue_trim_safe = base_safe &&
-      observation.queue_timing_confident && !fixed_output_cap_requested &&
+      observation.queue_timing_confident && !user_source_cap_requested &&
       mfgunlock::framecount::g_reflex_native_limit_us.load(
           std::memory_order_relaxed) == 0 &&
       (observation.sleep.sleep_interval_us == 0 ||
@@ -2697,6 +2695,83 @@ void StatusRow(const char* label, const char* value, const ImVec4& color) {
   ImGui::TextDisabled("%s", label);
   ImGui::TableNextColumn();
   ImGui::TextColored(color, "%s", value);
+}
+
+void StatusSectionRow(const char* label) {
+  ImGui::TableNextRow();
+  ImGui::TableNextColumn();
+  ImGui::TextDisabled("%s", label);
+  ImGui::TableNextColumn();
+  ImGui::Separator();
+}
+
+const char* SourceCapConfigOriginText(
+    mfgunlock::pacing::SourceCapConfigOrigin origin) {
+  using Origin = mfgunlock::pacing::SourceCapConfigOrigin;
+  switch (origin) {
+    case Origin::kConfigured:
+      return "ReflexSourceFpsCap";
+    case Origin::kLegacyDynamic:
+      return "migrated in memory from DynamicReflexSourceCap";
+    case Origin::kLegacyFixedOutput:
+      return "migrated in memory from FixedOutputFpsCap";
+    default:
+      return "default/off";
+  }
+}
+
+const char* UserSourceCapStatusText(
+    mfgunlock::framecount::internal::UserSourceCapStatus status) {
+  using Status =
+      mfgunlock::framecount::internal::UserSourceCapStatus;
+  switch (status) {
+    case Status::kInactiveGameControlled:
+      return "Inactive: select fixed MFG or enable Dynamic MFG";
+    case Status::kWaitingForDynamic:
+      return "Waiting for Dynamic MFG to become active";
+    case Status::kWaitingForReflex:
+      return "Pending: game has not exposed Reflex options";
+    case Status::kPending:
+      return "Pending application at the next safe Reflex update";
+    case Status::kActive:
+      return "Active";
+    case Status::kNativeLimitStricter:
+      return "Active; the game's stricter native cap wins";
+    case Status::kRejected:
+      return "Rejected by Reflex; native settings restored";
+    default:
+      return "Off";
+  }
+}
+
+const ImVec4& UserSourceCapColor(
+    mfgunlock::framecount::internal::UserSourceCapStatus status) {
+  using Status =
+      mfgunlock::framecount::internal::UserSourceCapStatus;
+  if (status == Status::kActive ||
+      status == Status::kNativeLimitStricter)
+    return kUiPositive;
+  if (status == Status::kRejected) return kUiError;
+  if (status == Status::kOff) return kUiMuted;
+  return kUiWarning;
+}
+
+std::string UserSourceCapSummary(
+    const mfgunlock::framecount::internal::UserSourceCapState& state) {
+  if (state.configured_fps == 0) return "0 is Off.";
+  std::ostringstream summary;
+  summary << state.configured_fps << " rendered FPS";
+  if (state.estimated_multiplier >= 2 &&
+      state.estimated_multiplier <= 6) {
+    summary << "; up to ~"
+            << static_cast<uint64_t>(state.configured_fps) *
+                   state.estimated_multiplier
+            << " displayed FPS estimated at " << state.estimated_multiplier
+            << "x";
+  } else {
+    summary << "; displayed FPS depends on the active multiplier";
+  }
+  return summary.str();
 }
 
 std::string AdaptiveComponentStatus(
@@ -3452,7 +3527,7 @@ void DrawLatencyGuardControl() {
                           mfgunlock::pacing::LatencyGuardMode::kMonitor)
                    ? "Read-only Reflex and render-queue monitoring."
                    : "No latency sampling or automatic cap."),
-        "Monitor Only is read-only and remains the recommended default. Automatic mode requires healthy, fresh Reflex timing and starts only for sustained queue pressure, output saturation, significant DLSS-G workload or at least 60 ms of marker-to-GPU pipeline time. That 60-ms signal is not end-to-end display latency and only starts a measured trial. With an addon-forced 4x-6x selection it tests one lower multiplier at a time, never below 3x, and keeps only measured improvements. A small source-FPS trim remains a queue-only fallback. The saved multiplier, Reflex mode, VSync, G-SYNC, Dynamic MFG and Reflex markers are never rewritten.",
+        "Monitor Only is read-only and remains the recommended default. Automatic mode requires healthy, fresh Reflex timing and starts only for sustained queue pressure, output saturation, significant DLSS-G workload or at least 60 ms of marker-to-GPU pipeline time. That 60-ms signal is not end-to-end display latency and only starts a measured trial. With an addon-forced 4x-6x selection it tests one lower multiplier at a time, never below 3x, and keeps only measured improvements. DLSS-G provider reconfiguration can cause a brief hitch whenever a trial or periodic recheck changes the multiplier. A small source-FPS trim remains a queue-only fallback. The saved multiplier, Reflex mode, VSync, G-SYNC, Dynamic MFG and Reflex markers are never rewritten.",
         mode == static_cast<int>(
                     mfgunlock::pacing::LatencyGuardMode::kAutomatic)
             ? "Advanced"
@@ -3617,7 +3692,7 @@ const char* ResponsiveTrialReasonText(
     case ResponsiveTrialReason::kHighInputLatency:
       return "Input-to-GPU latency at or above 60 ms";
     case ResponsiveTrialReason::kHighPipelineLatency:
-      return "Marker-to-GPU pipeline at or above 60 ms";
+      return "Estimated marker-to-GPU pipeline at or above 60 ms";
     case ResponsiveTrialReason::kGpuSaturatedLatencyProxy:
       return "GPU saturation + long marker pipeline proxy";
     case ResponsiveTrialReason::kFrameGenerationWorkload:
@@ -3647,10 +3722,10 @@ const char* ResponsiveTrialBlockerText(
       return "Waiting for the driver to confirm the fixed multiplier";
     case ResponsiveTrialBlocker::kReflexOptionsUnavailable:
       return "The game has not exposed slReflexSetOptions";
-    case ResponsiveTrialBlocker::kConflictingDynamicCap:
-      return "Waiting for the inactive Dynamic source cap to be restored";
-    case ResponsiveTrialBlocker::kFixedCapPending:
-      return "Waiting for the fixed-output cap to match the live multiplier";
+    case ResponsiveTrialBlocker::kUserCapPending:
+      return "Waiting for the rendered-FPS cap to be applied once";
+    case ResponsiveTrialBlocker::kUserCapRejected:
+      return "Rendered-FPS cap was rejected; native Reflex settings restored";
     case ResponsiveTrialBlocker::kNoTrigger:
       return "No sustained latency, saturation, queue or workload trigger";
     default:
@@ -4129,46 +4204,25 @@ void DrawLegacyOverlay(reshade::api::effect_runtime* /*runtime*/) {
         "The active DLSS-G runtime reports VSync unavailable; this can indicate\n"
         "an older/mismatched runtime or an unsupported presentation mode.");
   }
-  bool reflex_source_cap =
-      mfgunlock::framecount::g_dynamic_reflex_source_cap.load(
-          std::memory_order_relaxed);
-  if (ImGui::Checkbox("Advanced: cap application-rendered FPS with Reflex",
-                      &reflex_source_cap)) {
-    mfgunlock::framecount::g_dynamic_reflex_source_cap.store(
-        reflex_source_cap, std::memory_order_relaxed);
-    mfgunlock::framecount::NotifyDynamicModeChanged();
+  int source_cap = static_cast<int>(
+      mfgunlock::framecount::g_reflex_source_fps_cap.load(
+          std::memory_order_relaxed));
+  if (ImGui::InputInt("Rendered FPS Cap (Reflex)", &source_cap, 1, 10)) {
+    source_cap = source_cap <= 0 ? 0 : std::clamp(source_cap, 10, 1000);
+    mfgunlock::framecount::g_reflex_source_fps_cap.store(
+        static_cast<unsigned int>(source_cap), std::memory_order_relaxed);
+    g_source_cap_config_origin.store(
+        static_cast<unsigned int>(
+            mfgunlock::pacing::SourceCapConfigOrigin::kConfigured),
+        std::memory_order_relaxed);
+    mfgunlock::framecount::NotifySourceFpsCapChanged();
     reshade::set_config_value(nullptr, kConfigSection,
-                              "DynamicReflexSourceCap",
-                              reflex_source_cap ? 1 : 0);
+                              "ReflexSourceFpsCap", source_cap);
   }
-  ImGui::TextDisabled(
-      "This is a source-frame limiter, not a final-output target. Leave it off unless\n"
-      "you intentionally calculated a rendered-FPS cap for your multiplier/refresh setup.");
-  if (dynamic_mfg && dynamic_target != 0 && reflex_source_cap) {
-    if (mfgunlock::framecount::g_reflex_limit_applied.load(
-            std::memory_order_acquire)) {
-      const unsigned int effective_us =
-          mfgunlock::framecount::g_reflex_effective_limit_us.load(
-              std::memory_order_relaxed);
-      ImGui::Text("Reflex source-frame cap active: %u us (~%u rendered FPS); game requested %u us.",
-                  effective_us,
-                  effective_us == 0 ? 0u : (1000000u + effective_us / 2u) / effective_us,
-                  mfgunlock::framecount::g_reflex_native_limit_us.load(
-                      std::memory_order_relaxed));
-    } else if (!mfgunlock::framecount::g_reflex_hooked.load(
-                   std::memory_order_acquire)) {
-      ImGui::TextDisabled(
-          "The game has not exposed slReflexSetOptions; the advanced source cap is unavailable.");
-    } else if (!mfgunlock::framecount::g_reflex_options_seen.load(
-                   std::memory_order_acquire)) {
-      ImGui::TextDisabled(
-          "Reflex source-cap hook is ready; waiting for the game's Reflex options.");
-    } else {
-      ImGui::TextDisabled("Reflex source-frame cap pending (last result: %u).",
-                          mfgunlock::framecount::g_reflex_limit_result.load(
-                              std::memory_order_relaxed));
-    }
-  }
+  const auto source_cap_state =
+      mfgunlock::framecount::internal::ResolveUserSourceCapState();
+  ImGui::TextDisabled("%s", UserSourceCapSummary(source_cap_state).c_str());
+  ImGui::TextDisabled("%s", UserSourceCapStatusText(source_cap_state.status));
 
   int force = static_cast<int>(
       mfgunlock::framecount::g_force_multiplier.load(std::memory_order_relaxed));
@@ -4826,6 +4880,16 @@ void OnRegisterOverlay(reshade::api::effect_runtime* runtime) {
               dynamic_available
                   ? kUiPositive
                   : (dynamic_hard_unavailable ? kUiError : kUiWarning));
+    const auto overview_source_cap =
+        mfgunlock::framecount::internal::ResolveUserSourceCapState();
+    if (overview_source_cap.configured_fps != 0) {
+      const std::string cap_overview =
+          std::to_string(overview_source_cap.configured_fps) +
+          " rendered FPS; " +
+          UserSourceCapStatusText(overview_source_cap.status);
+      StatusRow("Rendered FPS cap", cap_overview.c_str(),
+                UserSourceCapColor(overview_source_cap.status));
+    }
     StatusRow("Display sync", sync_text.c_str(),
               driver_vsync_active ? kUiWarning : kUiMuted);
     StatusRow("HDR", hdr_seen ? (hdr_active ? "Detected" : "Off")
@@ -5113,51 +5177,6 @@ void OnRegisterOverlay(reshade::api::effect_runtime* runtime) {
 
     bool dynamic_mfg = dynamic_enabled && !dynamic_game_blocked;
 
-    int fixed_output_cap = static_cast<int>(
-        mfgunlock::framecount::g_fixed_output_fps_cap.load(
-            std::memory_order_relaxed));
-    const bool fixed_multiplier_selected =
-        mfgunlock::forcepolicy::IsFixedMultiplier(
-            static_cast<unsigned int>(force));
-    const uint32_t cap_multiplier =
-        mfgunlock::framecount::internal::ActiveFixedMultiplierForCap();
-    std::string fixed_cap_summary = "0 is Off.";
-    if (fixed_output_cap != 0 && fixed_multiplier_selected) {
-      const uint32_t interval_us =
-          mfgunlock::pacing::FixedOutputCapFrameLimitUs(
-              static_cast<uint32_t>(fixed_output_cap), cap_multiplier);
-      const float source_fps = interval_us == 0
-          ? 0.0f
-          : 1000000.0f / static_cast<float>(interval_us);
-      std::ostringstream summary;
-      summary << fixed_output_cap << " final FPS -> ~" << std::fixed
-              << std::setprecision(1) << source_fps << " source FPS at "
-              << cap_multiplier << "x.";
-      fixed_cap_summary = summary.str();
-    } else if (fixed_output_cap != 0) {
-      fixed_cap_summary = "Saved; select a fixed 2x-6x multiplier to apply.";
-    }
-    ImGui::TableNextRow();
-    ImGui::TableNextColumn();
-    SettingLabel(
-        "Fixed MFG Output Cap", fixed_cap_summary.c_str(),
-        "Desired final/output FPS for a fixed multiplier. The addon converts it to a Reflex source-frame cap using the multiplier that is actually active. A stricter native game cap is preserved. Dynamic MFG uses its own target, and displayed FPS should be verified with FrameView or PresentMon.");
-    ImGui::TableNextColumn();
-    if (dynamic_accepted) ImGui::BeginDisabled();
-    ImGui::SetNextItemWidth(-1.0f);
-    if (ImGui::InputInt("##fixed_output_cap", &fixed_output_cap, 1, 10)) {
-      fixed_output_cap = fixed_output_cap <= 0
-          ? 0
-          : std::clamp(fixed_output_cap, 10, 1000);
-      mfgunlock::framecount::g_fixed_output_fps_cap.store(
-          static_cast<unsigned int>(fixed_output_cap),
-          std::memory_order_relaxed);
-      mfgunlock::framecount::NotifyFixedOutputCapChanged();
-      reshade::set_config_value(nullptr, kConfigSection,
-                                "FixedOutputFpsCap", fixed_output_cap);
-    }
-    if (dynamic_accepted) ImGui::EndDisabled();
-
     ImGui::TableNextRow();
     ImGui::TableNextColumn();
     SettingLabel(
@@ -5182,71 +5201,95 @@ void OnRegisterOverlay(reshade::api::effect_runtime* runtime) {
     }
     if (block_dynamic_enable) ImGui::EndDisabled();
 
-    int dynamic_target = static_cast<int>(
-        mfgunlock::framecount::g_dynamic_target_fps.load(
-            std::memory_order_relaxed));
-    ImGui::TableNextRow();
-    ImGui::TableNextColumn();
-    SettingLabel(
-        "Target Output FPS", "0 follows the display refresh rate.",
-        "Sets Dynamic MFG's requested output target. With VSync active, Streamline follows the display refresh rate and may ignore a non-zero target. This is not the optional Reflex source-frame cap.");
-    ImGui::TableNextColumn();
-    if (!dynamic_mfg || dynamic_hard_unavailable) ImGui::BeginDisabled();
-    ImGui::SetNextItemWidth(-1.0f);
-    if (ImGui::InputInt("##dynamic_target", &dynamic_target, 1, 10)) {
-      dynamic_target = std::clamp(dynamic_target, 0, 1000);
-      mfgunlock::framecount::g_dynamic_target_fps.store(
-          static_cast<unsigned int>(dynamic_target),
-          std::memory_order_relaxed);
-      mfgunlock::framecount::NotifyDynamicModeChanged();
-      reshade::set_config_value(nullptr, kConfigSection,
-                                "DynamicTargetFPS", dynamic_target);
-    }
-    if (!dynamic_mfg || dynamic_hard_unavailable) ImGui::EndDisabled();
-
-    ImGui::TableNextRow();
-    ImGui::TableNextColumn();
-    SettingLabel(
-        "VSync / G-SYNC behavior",
-        driver_vsync_active && gsync_active
-            ? "Detected: driver VSync + G-SYNC active."
-            : (driver_vsync_active
-                   ? "Detected: driver VSync active."
-                   : (gsync_active ? "Detected: G-SYNC active; driver VSync is off."
-                                   : "Check the rule before choosing a target.")),
-        "With VSync active, Streamline ignores Target Output FPS and Dynamic MFG follows the active display refresh rate. G-SYNC does not change that VSync rule. Disable VSync if you want Dynamic MFG to use a custom output target.");
-    ImGui::TableNextColumn();
-    if (driver_vsync_active) {
-      ImGui::TextColored(kUiWarning, "Target ignored; follows refresh");
-    } else {
-      ImGui::TextWrapped("Custom target available when VSync is off");
-    }
-
-    bool reflex_source_cap =
-        mfgunlock::framecount::g_dynamic_reflex_source_cap.load(
+    if (dynamic_mfg) {
+      int dynamic_target = static_cast<int>(
+          mfgunlock::framecount::g_dynamic_target_fps.load(
+              std::memory_order_relaxed));
+      ImGui::TableNextRow();
+      ImGui::TableNextColumn();
+      SettingLabel(
+          "Dynamic Output Target", "0 follows the display refresh rate.",
+          "Sets Dynamic MFG's requested final/output target. With VSync active, Streamline follows the display refresh rate and may ignore a non-zero target. This is separate from Rendered FPS Cap (Reflex).");
+      ImGui::TableNextColumn();
+      if (dynamic_hard_unavailable) ImGui::BeginDisabled();
+      ImGui::SetNextItemWidth(-1.0f);
+      if (ImGui::InputInt("##dynamic_target", &dynamic_target, 1, 10)) {
+        dynamic_target = std::clamp(dynamic_target, 0, 1000);
+        mfgunlock::framecount::g_dynamic_target_fps.store(
+            static_cast<unsigned int>(dynamic_target),
             std::memory_order_relaxed);
-    ImGui::TableNextRow();
-    ImGui::TableNextColumn();
-    SettingLabel(
-        "Reflex Source-FPS Cap",
-        reflex_source_cap
-            ? "Enabled: the number above also caps rendered FPS."
-            : "Optional; limits rendered FPS, not final output FPS.",
-        "Uses Target Output FPS as a Reflex cap for application-rendered/source frames while Dynamic MFG is active. It does not force Dynamic's final output target when VSync is on. Leave disabled unless you intentionally want the same numeric value used as a source-frame cap.");
-    ImGui::TableNextColumn();
-    if (!dynamic_mfg || dynamic_hard_unavailable) ImGui::BeginDisabled();
-    if (ImGui::Checkbox("##reflex_source_cap", &reflex_source_cap)) {
-      mfgunlock::framecount::g_dynamic_reflex_source_cap.store(
-          reflex_source_cap, std::memory_order_relaxed);
-      mfgunlock::framecount::NotifyDynamicModeChanged();
-      reshade::set_config_value(nullptr, kConfigSection,
-                                "DynamicReflexSourceCap",
-                                reflex_source_cap ? 1 : 0);
+        mfgunlock::framecount::NotifyDynamicModeChanged();
+        reshade::set_config_value(nullptr, kConfigSection,
+                                  "DynamicTargetFPS", dynamic_target);
+      }
+      if (dynamic_hard_unavailable) ImGui::EndDisabled();
+
+      ImGui::TableNextRow();
+      ImGui::TableNextColumn();
+      SettingLabel(
+          "VSync / G-SYNC behavior",
+          driver_vsync_active && gsync_active
+              ? "Detected: driver VSync + G-SYNC active."
+              : (driver_vsync_active
+                     ? "Detected: driver VSync active."
+                     : (gsync_active
+                            ? "Detected: G-SYNC active; driver VSync is off."
+                            : "Check the rule before choosing a target.")),
+          "With VSync active, Streamline ignores Dynamic Output Target and follows the active display refresh rate. G-SYNC does not change that VSync rule. Rendered FPS Cap (Reflex) remains a separate source-frame limit.");
+      ImGui::TableNextColumn();
+      if (driver_vsync_active) {
+        ImGui::TextColored(kUiWarning, "Output target ignored; follows refresh");
+      } else {
+        ImGui::TextWrapped("Custom output target available when VSync is off");
+      }
     }
-    if (!dynamic_mfg || dynamic_hard_unavailable) ImGui::EndDisabled();
 
     ImGui::EndTable();
   }
+
+    ImGui::Spacing();
+    ImGui::TextDisabled("FRAME RATE CONTROLS");
+    ImGui::Separator();
+    if (ImGui::BeginTable("##frame_rate_controls", 2,
+                          ImGuiTableFlags_SizingStretchProp)) {
+      ImGui::TableSetupColumn("Setting", ImGuiTableColumnFlags_WidthStretch,
+                              0.62f);
+      ImGui::TableSetupColumn("Control", ImGuiTableColumnFlags_WidthStretch,
+                              0.38f);
+      const auto source_cap_state =
+          mfgunlock::framecount::internal::ResolveUserSourceCapState();
+      const std::string source_cap_summary =
+          UserSourceCapSummary(source_cap_state);
+      int source_cap = static_cast<int>(source_cap_state.configured_fps);
+      ImGui::TableNextRow();
+      ImGui::TableNextColumn();
+      SettingLabel(
+          "Rendered FPS Cap (Reflex)", source_cap_summary.c_str(),
+          "Caps frames rendered by the game before Frame Generation. For example, 120 means up to 120 real/source FPS; at a currently active 4x multiplier that can produce up to about 480 displayed FPS before display, VSync, game or GPU limits. It applies only with a fixed 2x-6x selection or active Dynamic MFG, preserves a stricter native game cap, and never guarantees final displayed FPS. Use FrameView or PresentMon to validate displayed output.");
+      ImGui::TableNextColumn();
+      ImGui::SetNextItemWidth(-1.0f);
+      if (ImGui::InputInt("##rendered_fps_cap", &source_cap, 1, 10)) {
+        source_cap = source_cap <= 0 ? 0
+                                     : std::clamp(source_cap, 10, 1000);
+        mfgunlock::framecount::g_reflex_source_fps_cap.store(
+            static_cast<unsigned int>(source_cap),
+            std::memory_order_relaxed);
+        g_source_cap_config_origin.store(
+            static_cast<unsigned int>(
+                mfgunlock::pacing::SourceCapConfigOrigin::kConfigured),
+            std::memory_order_relaxed);
+        mfgunlock::framecount::NotifySourceFpsCapChanged();
+        reshade::set_config_value(nullptr, kConfigSection,
+                                  "ReflexSourceFpsCap", source_cap);
+      }
+      ImGui::EndTable();
+      if (source_cap_state.configured_fps != 0) {
+        ImGui::TextColored(UserSourceCapColor(source_cap_state.status), "%s",
+                           UserSourceCapStatusText(source_cap_state.status));
+        ImGui::TextDisabled(
+            "Generated frames are added afterwards; actual displayed FPS may be lower.");
+      }
+    }
   }
 
   if (page == UiPage::Latency) {
@@ -5258,6 +5301,12 @@ void OnRegisterOverlay(reshade::api::effect_runtime* runtime) {
         static_cast<mfgunlock::pacing::LatencyGuardMode>(
             mfgunlock::framecount::g_latency_guard_mode.load(
                 std::memory_order_relaxed));
+    if (latency_guard_mode ==
+        mfgunlock::pacing::LatencyGuardMode::kAutomatic) {
+      ImGui::TextColored(
+          kUiWarning,
+          "Changing the DLSS-G multiplier may cause a brief hitch during trials and periodic rechecks.");
+    }
     if (latency_guard_mode == mfgunlock::pacing::LatencyGuardMode::kOff) {
       ImGui::TextDisabled(
           "Latency monitoring is off. Select Monitor Only for read-only information.");
@@ -5276,6 +5325,7 @@ void OnRegisterOverlay(reshade::api::effect_runtime* runtime) {
                               0.48f);
       ImGui::TableSetupColumn("Observation",
                               ImGuiTableColumnFlags_WidthStretch, 0.52f);
+      StatusSectionRow("INTEGRATION");
       const auto marker_health =
           static_cast<mfgunlock::pacing::MarkerHealth>(
               mfgunlock::framecount::g_latency_guard_marker_health.load(
@@ -5306,7 +5356,7 @@ void OnRegisterOverlay(reshade::api::effect_runtime* runtime) {
                     ? "Waiting for valid source timing"
                     : (queue_timing_confident
                            ? "Verified from at least 48 queue markers"
-                           : "Not enough complete queue markers; automatic blocked"),
+                           : "Queue-only actions unavailable; other latency signals remain active"),
                 queue_timing_confident
                     ? kUiPositive
                     : (source_timing_confident ? kUiWarning : kUiMuted));
@@ -5394,6 +5444,7 @@ void OnRegisterOverlay(reshade::api::effect_runtime* runtime) {
               ? "Not reported"
               : std::to_string(gpu_active / 1000.0f).substr(0, 5) +
                     " ms active GPU";
+      StatusSectionRow("PERFORMANCE");
       StatusRow("Display refresh", refresh_text.c_str(), kUiMuted);
       StatusRow("Active FG multiplier", multiplier_text.c_str(), kUiMuted);
       const bool iflip_known =
@@ -5406,8 +5457,8 @@ void OnRegisterOverlay(reshade::api::effect_runtime* runtime) {
                 !iflip_known ? "Not reported"
                              : (iflip_active ? "Active" : "Inactive"),
                 !iflip_known || iflip_active ? kUiMuted : kUiWarning);
-      StatusRow("Real-frame rate", source_text.c_str(), kUiMuted);
-      StatusRow("Estimated output rate", projected_text.c_str(),
+      StatusRow("Rendered/source FPS", source_text.c_str(), kUiMuted);
+      StatusRow("Estimated displayed FPS", projected_text.c_str(),
                 mfgunlock::framecount::g_latency_guard_oversubscribed.load(
                     std::memory_order_relaxed)
                     ? kUiWarning
@@ -5422,7 +5473,9 @@ void OnRegisterOverlay(reshade::api::effect_runtime* runtime) {
               observed_source_interval;
       StatusRow("Median render-queue wait", queue_text.c_str(),
                 meaningful_queue ? kUiWarning : kUiMuted);
-      StatusRow("Marker-to-GPU pipeline", pipeline_text.c_str(), kUiMuted);
+      StatusRow("Estimated pipeline latency", pipeline_text.c_str(), kUiMuted);
+      HelpMarker(
+          "This is a marker-to-GPU estimate from game/Reflex timestamps, not NVIDIA overlay end-to-end system latency.");
       StatusRow("GPU active work", gpu_active_text.c_str(), kUiMuted);
       StatusRow("Input-to-GPU latency", input_text.c_str(), kUiMuted);
       StatusRow("DLSS-G workload", ai_text.c_str(), kUiMuted);
@@ -5447,16 +5500,12 @@ void OnRegisterOverlay(reshade::api::effect_runtime* runtime) {
       const unsigned int limit_source =
           mfgunlock::framecount::g_reflex_limit_source.load(
               std::memory_order_relaxed);
+      const auto user_source_cap =
+          mfgunlock::framecount::internal::ResolveUserSourceCapState();
       const bool explicit_source_cap =
           limit_source == static_cast<unsigned int>(
               mfgunlock::framecount::internal::ReflexTargetSource::
-                  kDynamicSourceCap) &&
-          mfgunlock::framecount::g_dynamic_applied.load(
-              std::memory_order_relaxed);
-      const bool fixed_output_cap_active =
-          limit_source == static_cast<unsigned int>(
-              mfgunlock::framecount::internal::ReflexTargetSource::
-                  kFixedOutputCap);
+                  kUserSourceCap);
       const unsigned int multiplier_override =
           mfgunlock::framecount::g_latency_guard_multiplier_override.load(
               std::memory_order_acquire);
@@ -5480,6 +5529,7 @@ void OnRegisterOverlay(reshade::api::effect_runtime* runtime) {
       const unsigned int candidate_multiplier =
           mfgunlock::framecount::g_latency_guard_multiplier_candidate.load(
               std::memory_order_relaxed);
+      StatusSectionRow("GUARD DECISION");
       const char* action =
           explicit_source_cap
               ? "Explicit source cap has priority"
@@ -5488,35 +5538,20 @@ void OnRegisterOverlay(reshade::api::effect_runtime* runtime) {
                      ? MultiplierTrialPhaseText(multiplier_phase)
                      : (limit_source == 2
                      ? "Queue trim active"
-                     : (fixed_output_cap_active
-                            ? "Fixed output cap active; multiplier trials remain available"
                      : (latency_guard_mode ==
                                 mfgunlock::pacing::LatencyGuardMode::kAutomatic
                             ? "Monitoring; no safe cap change"
-                            : "Read-only monitoring"))));
+                            : "Read-only monitoring")));
       StatusRow("Guard action", action,
-                limit_source == 2 || fixed_output_cap_active ||
+                limit_source == 2 || explicit_source_cap ||
                         multiplier_override != 0
                     ? kUiPositive : kUiMuted);
-      const unsigned int fixed_output_target =
-          mfgunlock::framecount::g_fixed_output_fps_cap.load(
-              std::memory_order_relaxed);
-      if (fixed_output_target != 0) {
-        const unsigned int fixed_cap_multiplier =
-            mfgunlock::framecount::internal::ActiveFixedMultiplierForCap();
-        const unsigned int fixed_limit_us =
-            mfgunlock::pacing::FixedOutputCapFrameLimitUs(
-                fixed_output_target, fixed_cap_multiplier);
-        std::ostringstream fixed_cap_text;
-        fixed_cap_text << fixed_output_target << " final FPS -> ~"
-                       << std::fixed << std::setprecision(1)
-                       << (fixed_limit_us == 0
-                               ? 0.0f
-                               : 1000000.0f / fixed_limit_us)
-                       << " source FPS at " << fixed_cap_multiplier << "x"
-                       << (fixed_output_cap_active ? " (active)" : " (pending/inactive)");
-        StatusRow("Fixed output cap", fixed_cap_text.str().c_str(),
-                  fixed_output_cap_active ? kUiPositive : kUiMuted);
+      if (user_source_cap.configured_fps != 0) {
+        const std::string cap_text =
+            UserSourceCapSummary(user_source_cap) + "; " +
+            UserSourceCapStatusText(user_source_cap.status);
+        StatusRow("Rendered FPS cap", cap_text.c_str(),
+                  UserSourceCapColor(user_source_cap.status));
       }
       if (latency_guard_mode ==
               mfgunlock::pacing::LatencyGuardMode::kAutomatic &&
@@ -5593,7 +5628,8 @@ void OnRegisterOverlay(reshade::api::effect_runtime* runtime) {
           StatusRow("Pipeline comparison", comparison.c_str(), kUiMuted);
         }
       }
-      if (source_cap != 0 && limit_source != 2)
+      if (source_cap != 0 && limit_source != 2 &&
+          !user_source_cap.requested)
         StatusRow("Potential automatic trim", source_cap_text.c_str(),
                   kUiWarning);
       if (active_source_cap != 0) {
@@ -5608,8 +5644,8 @@ void OnRegisterOverlay(reshade::api::effect_runtime* runtime) {
         "when input/pipeline latency, a GPU-bound latency proxy, queueing, output saturation or DLSS-G workload justifies a trial.\n"
         "Each step uses two eight-sample windows and is kept only after lower measured latency.\n"
         "It periodically restores the saved multiplier for a new baseline and never goes below 3x.\n"
-        "A fixed output cap is recalculated for each tested multiplier; queue trim never replaces it.\n"
-        "A small source-rate trim is used only as a verified queue-pressure fallback when no fixed cap is set.\n"
+        "An explicit rendered-FPS cap remains unchanged across multiplier tests; queue trim never replaces it.\n"
+        "A small source-rate trim is used only as a verified queue-pressure fallback when no explicit cap is set.\n"
         "It does not replace Reflex or change Dynamic MFG, VSync or G-SYNC behavior.");
     ImGui::TextDisabled(
         "Real/source FPS comes from game markers. Estimated output FPS is source FPS x the driver-reported multiplier; it is not a displayed-frame measurement.");
@@ -5667,8 +5703,8 @@ void OnRegisterOverlay(reshade::api::effect_runtime* runtime) {
     SettingLabel(
         "Adaptive Quality Suite",
         "Unified quality profile for silhouettes, warping and inpaint.",
-        "Recommended experimental profile based on the best current visual result. It combines foreground/background-aware silhouette confidence, native motion-direction scatter coverage, smooth border-aware warp validation, forward/inverse candidate arbitration and safer inpaint decisions. While enabled, all standalone legacy quality experiments are preserved in the configuration but ignored, preventing overlapping patches and OLED-visible flicker. Exact kernel/provider validation is mandatory; unavailable components fall back independently. Requires a full game restart.",
-        "Experimental", kUiWarning);
+        "Coordinates silhouette confidence, motion-direction scatter coverage, warp validation, candidate arbitration and inpaint decisions as one quality path. Standalone legacy experiments remain saved but do not stack on top of it. Exact kernel/provider validation is mandatory and unavailable components fall back independently. Requires a full game restart.",
+        "Recommended", kUiPositive);
     ImGui::TableNextColumn();
     bool adaptive_quality =
         g_configured_adaptive_quality.load(std::memory_order_relaxed);
@@ -5682,24 +5718,26 @@ void OnRegisterOverlay(reshade::api::effect_runtime* runtime) {
     if (adaptive_quality !=
         g_adaptive_quality.load(std::memory_order_relaxed))
       ImGui::TextDisabled("Saved for next launch; restart the game.");
-    ImGui::EndTable();
-  }
-  if (g_configured_adaptive_quality.load(std::memory_order_relaxed)) {
-    ImGui::TextDisabled(
-        "Adaptive Quality manages geometry, boundary handling, warp validation and inpaint as one profile.");
-  }
 
-  if (ImGui::CollapsingHeader("Advanced")) {
-    if (g_configured_adaptive_quality.load(std::memory_order_relaxed)) {
+    if (adaptive_quality) {
       constexpr const char* kAdaptiveProfiles[] = {
-          "Stable V1 (Recommended)",
-          "Flicker-Reduced V2 (Experimental)"};
+          "Stable V1 (Compatibility)",
+          "Flicker-Reduced V2 (Recommended)"};
       int adaptive_profile = static_cast<int>(
           mfgunlock::adaptivequality::NormalizeProfile(
               g_configured_adaptive_quality_profile.load(
                   std::memory_order_relaxed))) - 1;
+      const char* profile_summary = adaptive_profile == 1
+          ? "Smoother confidence transitions for fine detail and silhouettes."
+          : "Released 1.1.5 behavior for compatibility.";
+      ImGui::TableNextRow();
+      ImGui::TableNextColumn();
+      SettingLabel(
+          "Adaptive Quality Profile", profile_summary,
+          "Flicker-Reduced V2 is the recommended visual profile and uses the approved frame-local confidence path without history or new resource reads. Stable V1 preserves the 1.1.5 behavior. Each component can fall back independently to V1 and then the native provider. Requires restart.");
+      ImGui::TableNextColumn();
       ImGui::SetNextItemWidth(-1.0f);
-      if (ImGui::Combo("Adaptive Quality profile", &adaptive_profile,
+      if (ImGui::Combo("##adaptive_quality_profile", &adaptive_profile,
                        kAdaptiveProfiles,
                        static_cast<int>(std::size(kAdaptiveProfiles)))) {
         const auto selected = adaptive_profile == 1
@@ -5714,15 +5752,21 @@ void OnRegisterOverlay(reshade::api::effect_runtime* runtime) {
             nullptr, kConfigSection, "AdaptiveQualityProfile",
             static_cast<int>(selected));
       }
-      HelpMarker(
-          "Stable V1 preserves the released 1.1.5 quality path. Flicker-Reduced V2 uses continuous frame-local confidence for warp, geometry and inpaint without history or new resource reads. Each component falls back independently to V1 and then the native provider when its exact kernel is unavailable. Requires restart.");
       if (g_configured_adaptive_quality_profile.load(
               std::memory_order_relaxed) !=
           g_adaptive_quality_profile.load(std::memory_order_relaxed)) {
         ImGui::TextDisabled("Saved for next launch; restart the game.");
       }
-      ImGui::Spacing();
     }
+    ImGui::EndTable();
+  }
+  if (page == UiPage::General &&
+      g_configured_adaptive_quality.load(std::memory_order_relaxed)) {
+    ImGui::TextDisabled(
+        "Adaptive Quality manages geometry, boundary handling, warp validation and inpaint as one profile.");
+  }
+
+  if (page == UiPage::General && ImGui::CollapsingHeader("Advanced")) {
     constexpr const char* kRuntimeModes[] = {
         "Game default", "Prefer local runtime - disable OTA",
         "Force NVIDIA OTA runtime"};
@@ -5930,6 +5974,30 @@ void OnRegisterOverlay(reshade::api::effect_runtime* runtime) {
                     ? "Active"
                     : (dynamic_available ? "Available" : "Inactive"),
                 kUiMuted);
+      const auto source_cap_state =
+          mfgunlock::framecount::internal::ResolveUserSourceCapState();
+      const std::string source_cap_value =
+          std::to_string(source_cap_state.configured_fps) +
+          " rendered FPS; " +
+          UserSourceCapStatusText(source_cap_state.status);
+      StatusRow("Rendered FPS cap", source_cap_value.c_str(),
+                UserSourceCapColor(source_cap_state.status));
+      std::ostringstream source_cap_intervals;
+      source_cap_intervals << "requested "
+                           << source_cap_state.requested_limit_us
+                           << " us; native "
+                           << source_cap_state.native_limit_us
+                           << " us; effective "
+                           << source_cap_state.effective_limit_us << " us";
+      StatusRow("Reflex cap intervals", source_cap_intervals.str().c_str(),
+                kUiMuted);
+      StatusRow(
+          "Cap configuration source",
+          SourceCapConfigOriginText(
+              static_cast<mfgunlock::pacing::SourceCapConfigOrigin>(
+                  g_source_cap_config_origin.load(
+                      std::memory_order_relaxed))),
+          kUiMuted);
       ImGui::EndTable();
     }
     ImGui::TextDisabled(
@@ -6138,6 +6206,11 @@ void OnRegisterOverlay(reshade::api::effect_runtime* runtime) {
     const std::string adaptive_inpaint_report = AdaptiveComponentStatus(
         adaptive_profile, blackwell_active_result.adaptive_inpaint_version,
         blackwell_active_result.adaptive_inpaint_decision);
+    const auto source_cap_state =
+        mfgunlock::framecount::internal::ResolveUserSourceCapState();
+    const auto source_cap_origin =
+        static_cast<mfgunlock::pacing::SourceCapConfigOrigin>(
+            g_source_cap_config_origin.load(std::memory_order_relaxed));
     std::ostringstream report;
     report << "MFG Unlock Diagnostics\n"
            << "Renderer: " << RenderApiName(render_api) << '\n'
@@ -6176,26 +6249,16 @@ void OnRegisterOverlay(reshade::api::effect_runtime* runtime) {
            << mfgunlock::framecount::g_dynamic_target_fps.load(
                   std::memory_order_relaxed)
            << '\n'
-           << "Dynamic Reflex source-cap preference: "
-           << (mfgunlock::framecount::g_dynamic_reflex_source_cap.load(
-                   std::memory_order_relaxed)
-                   ? "Enabled"
-                   : "Disabled")
-           << '\n'
-           << "Fixed MFG output cap: "
-           << mfgunlock::framecount::g_fixed_output_fps_cap.load(
-                  std::memory_order_relaxed)
-           << " final FPS; active multiplier "
-           << mfgunlock::framecount::internal::ActiveFixedMultiplierForCap()
-           << "x; Reflex interval "
-           << mfgunlock::framecount::g_reflex_effective_limit_us.load(
-                  std::memory_order_relaxed)
-           << " us; state "
-           << (mfgunlock::framecount::internal::FixedOutputCapRequested()
-                   ? (mfgunlock::framecount::internal::FixedOutputCapReady()
-                          ? "active/verified"
-                          : "pending")
-                   : "inactive")
+           << "Rendered FPS cap (Reflex): "
+           << source_cap_state.configured_fps << " source FPS; state "
+           << UserSourceCapStatusText(source_cap_state.status)
+           << "; estimated multiplier "
+           << source_cap_state.estimated_multiplier
+           << "x; requested/native/effective interval "
+           << source_cap_state.requested_limit_us << '/'
+           << source_cap_state.native_limit_us << '/'
+           << source_cap_state.effective_limit_us << " us; config "
+           << SourceCapConfigOriginText(source_cap_origin)
            << '\n'
            << "Latency Guard mode: "
            << mfgunlock::framecount::g_latency_guard_mode.load(
@@ -6262,7 +6325,7 @@ void OnRegisterOverlay(reshade::api::effect_runtime* runtime) {
            << (mfgunlock::framecount::g_latency_guard_queue_timing_confident.load(
                    std::memory_order_relaxed) ? "verified" : "unverified")
            << '\n'
-           << "Estimated real/source FPS: "
+           << "Estimated rendered/source FPS: "
            << mfgunlock::framecount::g_latency_guard_estimated_source_fps.load(
                   std::memory_order_relaxed)
            << '\n'
@@ -6282,7 +6345,7 @@ void OnRegisterOverlay(reshade::api::effect_runtime* runtime) {
            << mfgunlock::framecount::g_latency_guard_queue_p95_us.load(
                   std::memory_order_relaxed)
            << '\n'
-           << "Median/p95 marker-to-GPU pipeline (us): "
+           << "Estimated marker-to-GPU pipeline median/p95 (us; not end-to-end): "
            << mfgunlock::framecount::g_latency_guard_pipeline_latency_us.load(
                   std::memory_order_relaxed)
            << '/'
@@ -6519,6 +6582,9 @@ void OnRegisterOverlay(reshade::api::effect_runtime* runtime) {
 
 void LoadConfig() {
   int value = 0;
+  int legacy_fixed_output_cap = 0;
+  bool legacy_fixed_output_cap_present = false;
+  bool legacy_dynamic_source_cap = false;
   if (reshade::get_config_value(nullptr, kConfigSection,
                                 "ExperimentalAdaptiveQuality", value))
     g_adaptive_quality.store(value != 0, std::memory_order_relaxed);
@@ -6696,12 +6762,9 @@ void LoadConfig() {
                 : mfgunlock::forcepolicy::FixedOverrideStatus::kNative),
         std::memory_order_relaxed);
   }
-  if (reshade::get_config_value(nullptr, kConfigSection,
-                                "FixedOutputFpsCap", value)) {
-    if (value != 0 && (value < 10 || value > 1000)) value = 0;
-    mfgunlock::framecount::g_fixed_output_fps_cap.store(
-        static_cast<unsigned int>(value), std::memory_order_relaxed);
-  }
+  legacy_fixed_output_cap_present = reshade::get_config_value(
+      nullptr, kConfigSection, "FixedOutputFpsCap",
+      legacy_fixed_output_cap);
   if (reshade::get_config_value(nullptr, kConfigSection, "DynamicMFG", value)) {
     mfgunlock::framecount::g_dynamic_mfg_enabled.store(value != 0,
                                                         std::memory_order_relaxed);
@@ -6713,9 +6776,32 @@ void LoadConfig() {
   }
   if (reshade::get_config_value(nullptr, kConfigSection,
                                "DynamicReflexSourceCap", value)) {
-    mfgunlock::framecount::g_dynamic_reflex_source_cap.store(
-        value != 0, std::memory_order_relaxed);
+    legacy_dynamic_source_cap = value != 0;
   }
+  int configured_source_cap = 0;
+  const bool source_cap_key_present = reshade::get_config_value(
+      nullptr, kConfigSection, "ReflexSourceFpsCap", configured_source_cap);
+  const auto source_cap = mfgunlock::pacing::ResolveSourceCapConfig(
+      source_cap_key_present,
+      configured_source_cap > 0
+          ? static_cast<unsigned int>(configured_source_cap)
+          : 0u,
+      mfgunlock::framecount::g_dynamic_mfg_enabled.load(
+          std::memory_order_relaxed),
+      legacy_dynamic_source_cap,
+      mfgunlock::framecount::g_dynamic_target_fps.load(
+          std::memory_order_relaxed),
+      legacy_fixed_output_cap_present,
+      legacy_fixed_output_cap > 0
+          ? static_cast<unsigned int>(legacy_fixed_output_cap)
+          : 0u,
+      mfgunlock::framecount::g_force_multiplier.load(
+          std::memory_order_relaxed));
+  mfgunlock::framecount::g_reflex_source_fps_cap.store(
+      source_cap.source_fps, std::memory_order_relaxed);
+  g_source_cap_config_origin.store(
+      static_cast<unsigned int>(source_cap.origin),
+      std::memory_order_relaxed);
   if (reshade::get_config_value(nullptr, kConfigSection,
                                 "LatencyGuardMode", value)) {
     if (value < static_cast<int>(
