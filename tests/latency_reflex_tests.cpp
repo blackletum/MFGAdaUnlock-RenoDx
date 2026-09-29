@@ -36,15 +36,16 @@ int main() {
   fc::internal::RefreshReflexTarget(); CHECK(calls.size()==2 && fc::g_latency_guard_refresh_pending.load());
   fc::internal::g_reflex_owner_thread.store(GetCurrentThreadId());
   fc::g_latency_guard_mode.store(2); fc::g_latency_guard_auto_cap_ready.store(true);
+  fc::g_latency_guard_live_multiplier.store(4);
   fc::g_latency_guard_active_source_cap_fps.store(97);
   reject_override=true; calls.clear();
   CHECK(fc::internal::HookedReflexSetOptions(native)==sl::Result::eOk);
-  CHECK(calls.size()==2 && calls[0]>0 && calls[1]==0);
+  CHECK(calls.size()==2 && calls[0]==2577 && calls[1]==0);
   CHECK(!fc::g_reflex_limit_applied.load() && !fc::g_latency_guard_auto_cap_ready.load());
 
-  // One direct source-FPS cap is shared by fixed and Dynamic MFG. Generated
-  // frames are not part of the requested Reflex rate, and a stricter native
-  // game limit is never relaxed.
+  // The user value is the final/output FPS ceiling understood by Reflex and
+  // DLSS-G. It is not multiplied again by the selected MFG multiplier, and a
+  // stricter native game limit is never relaxed.
   reject_override=false; calls.clear();
   fc::g_force_multiplier.store(4);
   fc::g_latency_guard_live_multiplier.store(4);
@@ -69,9 +70,9 @@ int main() {
   CHECK(fc::internal::ResolveUserSourceCapState().status ==
         fc::internal::UserSourceCapStatus::kNativeLimitStricter);
 
-  // The complete 6x -> 5x -> 4x -> 3x trial keeps the exact same source
-  // interval. Refresh therefore detects identical forwarded options and does
-  // not call Reflex again for any multiplier step.
+  // The complete 6x -> 5x -> 4x -> 3x trial keeps the same final/output target.
+  // Refresh therefore detects identical forwarded options and does not call
+  // Reflex again for any multiplier step.
   calls.clear(); native.frameLimitUs=0;
   fc::g_force_multiplier.store(6);
   fc::g_latency_guard_live_multiplier.store(6);
@@ -84,7 +85,7 @@ int main() {
   }
 
   // Game-controlled fixed MFG is intentionally excluded; active Dynamic uses
-  // the same direct source cap without borrowing its output target value.
+  // the same final/output cap independently of its scheduler target.
   calls.clear();
   fc::g_force_multiplier.store(0);
   fc::g_dynamic_mfg_enabled.store(false);

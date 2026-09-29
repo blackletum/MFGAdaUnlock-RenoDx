@@ -541,11 +541,13 @@ MFG is enabled. If VSync is used with Dynamic MFG, use the validated 310.9.1 +
 that cannot reach Independent Flip; NVIDIA warns that such a path can add high
 latency.
 
-The optional **Advanced: cap application-rendered FPS with Reflex** setting is
-off by default. It changes `ReflexOptions::frameLimitUs`, which limits source
-frames rendered by the game; it is not a final displayed-FPS control and must
-not be treated as a workaround for VSync ignoring the Dynamic target. When the
-advanced cap is disabled, the game-owned Reflex options pass through unchanged.
+The optional **Output FPS Cap (Reflex)** setting is off by default. It changes
+`ReflexOptions::frameLimitUs` and represents the final/output FPS ceiling: a
+value of `120` targets up to approximately 120 displayed FPS. Reflex and the
+DLSS-G pacer account for generated frames, so fixed 4x corresponds to roughly
+30 game-rendered FPS at that ceiling. Actual output can be lower because of the
+game, GPU, display or VSync. When the cap is disabled, the game-owned Reflex
+options pass through unchanged.
 
 The addon queries `DLSSGState::bIsDynamicMFGSupported` on D3D12 whether or not
 the option is already enabled, using addon-owned v4 storage so games compiled
@@ -673,7 +675,9 @@ Written to your `ReShade.ini` under `[RenoDX.MFGUnlock]`:
 | `ForceMultiplier` | `0` | `0` respects the game's own choice; `2`–`6` requests that exact multiplier, whether it is higher or lower than the game's choice |
 | `DynamicMFG` | `0` | Requests native NVIDIA Dynamic MFG only on the validated 310.9.1 + 2.14.1 D3D12 stack after the provider reports support; takes priority over `ForceMultiplier` while active |
 | `DynamicTargetFPS` | `0` | Dynamic output target; `0` follows display refresh. With VSync active, Streamline ignores a nonzero value and follows refresh instead |
-| `DynamicReflexSourceCap` | `0` | Advanced opt-in source/application frame cap through Reflex; not a final-output target |
+| `ReflexSourceFpsCap` | `0` | Compatibility key for **Output FPS Cap (Reflex)**. Despite the historical key name, the number is the final/output FPS ceiling; `120` targets up to approximately 120 displayed FPS |
+| `DynamicReflexSourceCap` | `0` | Legacy migration flag. New configurations should use `ReflexSourceFpsCap` through the UI |
+| `FixedOutputFpsCap` | `0` | Legacy fixed-output setting migrated in memory when the current cap key is absent |
 | `RaiseFrameCeiling` | `0` | Raises an old Streamline plugin's compiled hard limit to 6x. Off by default because that breaks some games; the stale device-limit bypass needed by STALKER 2 is always applied |
 | `RuntimeSelectionMode` | `0` | `0` preserves the game's runtime policy, `1` disables OTA/downloaded plugins to prefer local files, and `2` forces the NVIDIA OTA flags; restart required |
 | `HDRCompatibilityMode` | `0` | `0` is **Native** (default for new configurations), `1` forces UI Composition, `2` enables **Automatic Guard + UI Composition (HDR compatibility)**, and `3` enables Final Color Fallback; existing saved values remain unchanged |
@@ -736,8 +740,8 @@ the effective downstream request separately.
   pending until a successful call applies it.
 - If VSync is active, a target such as 100 FPS is intentionally ignored by
   Streamline and Dynamic follows display refresh. Disable VSync for a custom
-  Dynamic output target; do not use the advanced Reflex source cap as though it
-  were a final-output limiter.
+  Dynamic scheduler target. **Output FPS Cap (Reflex)** is a separate final
+  ceiling and does not make an ignored Dynamic target authoritative.
 - Check NVIDIA App global and per-game DLSS overrides, reset any matching NVPI
   Frame Generation/NGX overrides, and check the addon's Streamline
   runtime-selection mode. Apply the profile and restart fully after changes.

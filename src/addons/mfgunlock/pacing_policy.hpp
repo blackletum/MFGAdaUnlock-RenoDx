@@ -6,6 +6,7 @@
 #pragma once
 
 #include <cstdint>
+#include <limits>
 
 namespace mfgunlock::pacing {
 
@@ -64,15 +65,29 @@ inline constexpr uint32_t TargetFpsToFrameLimitUs(uint32_t target_fps) {
   return static_cast<uint32_t>((1000000ull + target_fps / 2u) / target_fps);
 }
 
+// Reflex's limiter is frame-generation aware: the submitted rate is the final
+// pacing target, while the driver derives the application-rendered cadence.
+// Latency Guard reasons in source FPS, so convert its private queue-trim target
+// back to a final/output target before forwarding it to Reflex.
+inline constexpr uint32_t SourceFpsCapToReflexOutputTargetFps(
+    uint32_t source_fps, uint32_t multiplier) {
+  if (source_fps == 0 || multiplier < 2 || multiplier > 6) return 0;
+  const uint64_t output_fps =
+      static_cast<uint64_t>(source_fps) * multiplier;
+  return output_fps > (std::numeric_limits<uint32_t>::max)()
+             ? (std::numeric_limits<uint32_t>::max)()
+             : static_cast<uint32_t>(output_fps);
+}
+
 inline constexpr bool IsValidFixedOutputCap(uint32_t output_fps,
                                             uint32_t multiplier) {
   return output_fps >= 10 && output_fps <= 1000 &&
          multiplier >= 2 && multiplier <= 6;
 }
 
-// A fixed-MFG output target is implemented through Reflex's source-frame
-// limiter. Keep the division in microseconds so targets such as 175 FPS at 3x
-// do not first collapse to an imprecise integer source-FPS value.
+// Legacy conversion retained only for regression coverage of the superseded
+// FixedOutputFpsCap behavior. The current Reflex output cap is applied directly
+// and does not use this multiplier-dependent conversion.
 inline constexpr uint32_t FixedOutputCapFrameLimitUs(uint32_t output_fps,
                                                      uint32_t multiplier) {
   if (!IsValidFixedOutputCap(output_fps, multiplier)) return 0;
@@ -86,8 +101,8 @@ inline constexpr uint32_t FrameLimitUsToFps(uint32_t frame_limit_us) {
                                frame_limit_us);
 }
 
-inline constexpr bool IsValidSourceFpsCap(uint32_t source_fps) {
-  return source_fps >= 10 && source_fps <= 1000;
+inline constexpr bool IsValidReflexOutputFpsCap(uint32_t output_fps) {
+  return output_fps >= 10 && output_fps <= 1000;
 }
 
 enum class SourceCapConfigOrigin : uint32_t {
@@ -98,35 +113,35 @@ enum class SourceCapConfigOrigin : uint32_t {
 };
 
 struct SourceCapConfig {
-  uint32_t source_fps = 0;
+  uint32_t output_fps = 0;
   SourceCapConfigOrigin origin = SourceCapConfigOrigin::kNone;
 };
 
 // Preserve the currently active meaning of the two experimental cap controls
-// without writing over their old keys. The new direct source-FPS key always
-// wins, including an explicit zero. If both legacy modes were configured, the
-// mode selected for this launch wins; a fixed value is otherwise preferred
-// because it can be converted exactly from its saved multiplier.
+// without writing over their old keys. The current key retains its historical
+// name for configuration compatibility, but its value is the final/output FPS
+// target passed to Reflex. An explicit value, including zero, always wins.
 inline constexpr SourceCapConfig ResolveSourceCapConfig(
-    bool current_key_present, uint32_t current_source_fps,
+    bool current_key_present, uint32_t current_output_fps,
     bool dynamic_configured, bool legacy_dynamic_cap,
     uint32_t dynamic_target_fps, bool legacy_fixed_key_present,
     uint32_t legacy_fixed_output_fps, uint32_t fixed_multiplier) {
   if (current_key_present) {
-    return {IsValidSourceFpsCap(current_source_fps) ? current_source_fps : 0,
+    return {IsValidReflexOutputFpsCap(current_output_fps)
+                ? current_output_fps
+                : 0,
             SourceCapConfigOrigin::kConfigured};
   }
   if (dynamic_configured && legacy_dynamic_cap &&
-      IsValidSourceFpsCap(dynamic_target_fps)) {
+      IsValidReflexOutputFpsCap(dynamic_target_fps)) {
     return {dynamic_target_fps, SourceCapConfigOrigin::kLegacyDynamic};
   }
   if (legacy_fixed_key_present &&
       IsValidFixedOutputCap(legacy_fixed_output_fps, fixed_multiplier)) {
-    return {FrameLimitUsToFps(FixedOutputCapFrameLimitUs(
-                legacy_fixed_output_fps, fixed_multiplier)),
+    return {legacy_fixed_output_fps,
             SourceCapConfigOrigin::kLegacyFixedOutput};
   }
-  if (legacy_dynamic_cap && IsValidSourceFpsCap(dynamic_target_fps)) {
+  if (legacy_dynamic_cap && IsValidReflexOutputFpsCap(dynamic_target_fps)) {
     return {dynamic_target_fps, SourceCapConfigOrigin::kLegacyDynamic};
   }
   return {};

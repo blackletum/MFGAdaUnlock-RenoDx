@@ -2308,9 +2308,9 @@ void UpdateLatencyGuard(reshade::api::swapchain* swapchain) {
       mfgunlock::framecount::internal::UserSourceCapStatus::kRejected;
   if (user_source_cap_requested && !user_source_cap_ready &&
       !user_source_cap_rejected) {
-    // Apply the direct source cap once at the established safe Reflex
-    // boundary. It is invariant across multiplier trials, so later 6x->5x->
-    // 4x->3x transitions never need another Reflex replay.
+    // Apply the user-requested final/output cap once at the established safe
+    // Reflex boundary. It is invariant across multiplier trials, so later
+    // 6x->5x->4x->3x transitions never need another Reflex replay.
     mfgunlock::framecount::g_latency_guard_refresh_pending.store(
         true, std::memory_order_release);
     mfgunlock::framecount::internal::RefreshReflexTarget();
@@ -2426,7 +2426,7 @@ void UpdateLatencyGuard(reshade::api::swapchain* swapchain) {
       std::memory_order_relaxed);
   if (old_multiplier_override != multiplier_override) {
     // The next normal game SetOptions submission picks up (or releases) the
-    // bounded runtime override. The direct source-FPS cap is unchanged, so do
+    // bounded runtime override. The user output-FPS cap is unchanged, so do
     // not replay Reflex or add a second reconfiguration at this transition.
     mfgunlock::framecount::g_force_failed_for.store(0,
                                                     std::memory_order_relaxed);
@@ -2710,7 +2710,7 @@ const char* SourceCapConfigOriginText(
   using Origin = mfgunlock::pacing::SourceCapConfigOrigin;
   switch (origin) {
     case Origin::kConfigured:
-      return "ReflexSourceFpsCap";
+      return "Reflex output cap (compatibility key ReflexSourceFpsCap)";
     case Origin::kLegacyDynamic:
       return "migrated in memory from DynamicReflexSourceCap";
     case Origin::kLegacyFixedOutput:
@@ -2760,16 +2760,18 @@ std::string UserSourceCapSummary(
     const mfgunlock::framecount::internal::UserSourceCapState& state) {
   if (state.configured_fps == 0) return "0 is Off.";
   std::ostringstream summary;
-  summary << state.configured_fps << " rendered FPS";
+  summary << "Targets up to ~" << state.configured_fps
+          << " displayed FPS";
   if (state.estimated_multiplier >= 2 &&
       state.estimated_multiplier <= 6) {
-    summary << "; up to ~"
-            << static_cast<uint64_t>(state.configured_fps) *
-                   state.estimated_multiplier
-            << " displayed FPS estimated at " << state.estimated_multiplier
-            << "x";
+    const float estimated_source =
+        static_cast<float>(state.configured_fps) /
+        static_cast<float>(state.estimated_multiplier);
+    summary << "; ~" << std::fixed << std::setprecision(1)
+            << estimated_source << " game-rendered FPS at "
+            << state.estimated_multiplier << "x";
   } else {
-    summary << "; displayed FPS depends on the active multiplier";
+    summary << "; base FPS depends on the active multiplier";
   }
   return summary.str();
 }
@@ -3723,9 +3725,9 @@ const char* ResponsiveTrialBlockerText(
     case ResponsiveTrialBlocker::kReflexOptionsUnavailable:
       return "The game has not exposed slReflexSetOptions";
     case ResponsiveTrialBlocker::kUserCapPending:
-      return "Waiting for the rendered-FPS cap to be applied once";
+      return "Waiting for the Reflex output cap to be applied once";
     case ResponsiveTrialBlocker::kUserCapRejected:
-      return "Rendered-FPS cap was rejected; native Reflex settings restored";
+      return "Output-FPS cap was rejected; native Reflex settings restored";
     case ResponsiveTrialBlocker::kNoTrigger:
       return "No sustained latency, saturation, queue or workload trigger";
     default:
@@ -4207,7 +4209,7 @@ void DrawLegacyOverlay(reshade::api::effect_runtime* /*runtime*/) {
   int source_cap = static_cast<int>(
       mfgunlock::framecount::g_reflex_source_fps_cap.load(
           std::memory_order_relaxed));
-  if (ImGui::InputInt("Rendered FPS Cap (Reflex)", &source_cap, 1, 10)) {
+  if (ImGui::InputInt("Output FPS Cap (Reflex)", &source_cap, 1, 10)) {
     source_cap = source_cap <= 0 ? 0 : std::clamp(source_cap, 10, 1000);
     mfgunlock::framecount::g_reflex_source_fps_cap.store(
         static_cast<unsigned int>(source_cap), std::memory_order_relaxed);
@@ -4885,9 +4887,9 @@ void OnRegisterOverlay(reshade::api::effect_runtime* runtime) {
     if (overview_source_cap.configured_fps != 0) {
       const std::string cap_overview =
           std::to_string(overview_source_cap.configured_fps) +
-          " rendered FPS; " +
+          " final/output FPS; " +
           UserSourceCapStatusText(overview_source_cap.status);
-      StatusRow("Rendered FPS cap", cap_overview.c_str(),
+      StatusRow("Output FPS cap", cap_overview.c_str(),
                 UserSourceCapColor(overview_source_cap.status));
     }
     StatusRow("Display sync", sync_text.c_str(),
@@ -5209,7 +5211,7 @@ void OnRegisterOverlay(reshade::api::effect_runtime* runtime) {
       ImGui::TableNextColumn();
       SettingLabel(
           "Dynamic Output Target", "0 follows the display refresh rate.",
-          "Sets Dynamic MFG's requested final/output target. With VSync active, Streamline follows the display refresh rate and may ignore a non-zero target. This is separate from Rendered FPS Cap (Reflex).");
+          "Sets Dynamic MFG's requested final/output target. With VSync active, Streamline follows the display refresh rate and may ignore a non-zero target. This scheduler target is separate from Output FPS Cap (Reflex).");
       ImGui::TableNextColumn();
       if (dynamic_hard_unavailable) ImGui::BeginDisabled();
       ImGui::SetNextItemWidth(-1.0f);
@@ -5235,7 +5237,7 @@ void OnRegisterOverlay(reshade::api::effect_runtime* runtime) {
                      : (gsync_active
                             ? "Detected: G-SYNC active; driver VSync is off."
                             : "Check the rule before choosing a target.")),
-          "With VSync active, Streamline ignores Dynamic Output Target and follows the active display refresh rate. G-SYNC does not change that VSync rule. Rendered FPS Cap (Reflex) remains a separate source-frame limit.");
+          "With VSync active, Streamline ignores Dynamic Output Target and follows the active display refresh rate. G-SYNC does not change that VSync rule. Output FPS Cap (Reflex) remains a separate final-output ceiling.");
       ImGui::TableNextColumn();
       if (driver_vsync_active) {
         ImGui::TextColored(kUiWarning, "Output target ignored; follows refresh");
@@ -5264,8 +5266,8 @@ void OnRegisterOverlay(reshade::api::effect_runtime* runtime) {
       ImGui::TableNextRow();
       ImGui::TableNextColumn();
       SettingLabel(
-          "Rendered FPS Cap (Reflex)", source_cap_summary.c_str(),
-          "Caps frames rendered by the game before Frame Generation. For example, 120 means up to 120 real/source FPS; at a currently active 4x multiplier that can produce up to about 480 displayed FPS before display, VSync, game or GPU limits. It applies only with a fixed 2x-6x selection or active Dynamic MFG, preserves a stricter native game cap, and never guarantees final displayed FPS. Use FrameView or PresentMon to validate displayed output.");
+          "Output FPS Cap (Reflex)", source_cap_summary.c_str(),
+          "Sets the final/output FPS ceiling handled by Reflex and the DLSS-G pacer. Entering 120 targets up to approximately 120 displayed FPS, not 120 game-rendered FPS. At fixed 4x, roughly 30 FPS are rendered by the game and the remaining frames are generated. It applies only with a fixed 2x-6x selection or active Dynamic MFG, preserves a stricter native game cap, and cannot force hardware, VSync or the game to reach the target. Use FrameView Displayed FPS to validate final output.");
       ImGui::TableNextColumn();
       ImGui::SetNextItemWidth(-1.0f);
       if (ImGui::InputInt("##rendered_fps_cap", &source_cap, 1, 10)) {
@@ -5287,7 +5289,7 @@ void OnRegisterOverlay(reshade::api::effect_runtime* runtime) {
         ImGui::TextColored(UserSourceCapColor(source_cap_state.status), "%s",
                            UserSourceCapStatusText(source_cap_state.status));
         ImGui::TextDisabled(
-            "Generated frames are added afterwards; actual displayed FPS may be lower.");
+            "This is the final FPS ceiling; actual displayed FPS may be lower.");
       }
     }
   }
@@ -5532,7 +5534,7 @@ void OnRegisterOverlay(reshade::api::effect_runtime* runtime) {
       StatusSectionRow("GUARD DECISION");
       const char* action =
           explicit_source_cap
-              ? "Explicit source cap has priority"
+              ? "Explicit Reflex output cap has priority"
               : (multiplier_phase !=
                          mfgunlock::latency::MultiplierTrialPhase::kIdle
                      ? MultiplierTrialPhaseText(multiplier_phase)
@@ -5550,7 +5552,7 @@ void OnRegisterOverlay(reshade::api::effect_runtime* runtime) {
         const std::string cap_text =
             UserSourceCapSummary(user_source_cap) + "; " +
             UserSourceCapStatusText(user_source_cap.status);
-        StatusRow("Rendered FPS cap", cap_text.c_str(),
+        StatusRow("Output FPS cap", cap_text.c_str(),
                   UserSourceCapColor(user_source_cap.status));
       }
       if (latency_guard_mode ==
@@ -5644,7 +5646,7 @@ void OnRegisterOverlay(reshade::api::effect_runtime* runtime) {
         "when input/pipeline latency, a GPU-bound latency proxy, queueing, output saturation or DLSS-G workload justifies a trial.\n"
         "Each step uses two eight-sample windows and is kept only after lower measured latency.\n"
         "It periodically restores the saved multiplier for a new baseline and never goes below 3x.\n"
-        "An explicit rendered-FPS cap remains unchanged across multiplier tests; queue trim never replaces it.\n"
+        "An explicit Reflex output-FPS cap remains unchanged across multiplier tests; queue trim never replaces it.\n"
         "A small source-rate trim is used only as a verified queue-pressure fallback when no explicit cap is set.\n"
         "It does not replace Reflex or change Dynamic MFG, VSync or G-SYNC behavior.");
     ImGui::TextDisabled(
@@ -5978,9 +5980,9 @@ void OnRegisterOverlay(reshade::api::effect_runtime* runtime) {
           mfgunlock::framecount::internal::ResolveUserSourceCapState();
       const std::string source_cap_value =
           std::to_string(source_cap_state.configured_fps) +
-          " rendered FPS; " +
+          " final/output FPS; " +
           UserSourceCapStatusText(source_cap_state.status);
-      StatusRow("Rendered FPS cap", source_cap_value.c_str(),
+      StatusRow("Output FPS cap", source_cap_value.c_str(),
                 UserSourceCapColor(source_cap_state.status));
       std::ostringstream source_cap_intervals;
       source_cap_intervals << "requested "
@@ -6249,8 +6251,8 @@ void OnRegisterOverlay(reshade::api::effect_runtime* runtime) {
            << mfgunlock::framecount::g_dynamic_target_fps.load(
                   std::memory_order_relaxed)
            << '\n'
-           << "Rendered FPS cap (Reflex): "
-           << source_cap_state.configured_fps << " source FPS; state "
+           << "Output FPS cap (Reflex): "
+           << source_cap_state.configured_fps << " final/output FPS; state "
            << UserSourceCapStatusText(source_cap_state.status)
            << "; estimated multiplier "
            << source_cap_state.estimated_multiplier
@@ -6798,7 +6800,7 @@ void LoadConfig() {
       mfgunlock::framecount::g_force_multiplier.load(
           std::memory_order_relaxed));
   mfgunlock::framecount::g_reflex_source_fps_cap.store(
-      source_cap.source_fps, std::memory_order_relaxed);
+      source_cap.output_fps, std::memory_order_relaxed);
   g_source_cap_config_origin.store(
       static_cast<unsigned int>(source_cap.origin),
       std::memory_order_relaxed);

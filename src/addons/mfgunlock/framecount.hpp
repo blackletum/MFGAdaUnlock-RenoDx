@@ -171,9 +171,9 @@ inline std::atomic<unsigned int> g_reflex_effective_limit_us{0};
 inline std::atomic<unsigned int> g_reflex_limit_result{0};
 inline std::atomic_bool g_reflex_user_cap_rejected{false};
 inline std::atomic_bool g_reflex_limit_failure_logged{false};
-// A single explicit Reflex limiter for application-rendered/source frames.
-// Generated frames are added afterwards, so this value never claims to be a
-// final/displayed-FPS target. Zero leaves the game's native limiter untouched.
+// A single explicit final/output FPS ceiling handled by Reflex and the DLSS-G
+// pacer. The historical internal/configuration name is retained for
+// compatibility. Zero leaves the game's native limiter untouched.
 inline std::atomic<unsigned int> g_reflex_source_fps_cap{0};
 
 // Latency Guard is monitor-only by default, so existing users receive useful
@@ -239,7 +239,7 @@ inline std::atomic<unsigned int> g_latency_guard_clear_samples{0};
 inline std::atomic<unsigned int> g_latency_guard_candidate_cap_fps{0};
 inline std::atomic_bool g_latency_guard_refresh_pending{false};
 inline std::atomic<unsigned long long> g_latency_guard_ui_heartbeat_ms{0};
-// 0 = native/no addon policy, 1 = explicit user source cap,
+// Policy source: 0 = native/no addon policy, 1 = explicit user output cap,
 // 2 = Latency Guard queue trim.
 inline std::atomic<unsigned int> g_reflex_limit_source{0};
 
@@ -609,7 +609,7 @@ inline bool UserSourceCapRequested() {
   const bool fixed_selected = forcepolicy::IsFixedMultiplier(
       g_force_multiplier.load(std::memory_order_relaxed));
   return g_addon_enabled.load(std::memory_order_relaxed) &&
-         pacing::IsValidSourceFpsCap(cap) &&
+         pacing::IsValidReflexOutputFpsCap(cap) &&
          (g_dynamic_applied.load(std::memory_order_relaxed) ||
           fixed_selected);
 }
@@ -673,7 +673,7 @@ inline UserSourceCapState ResolveUserSourceCapState() {
       g_reflex_native_limit_us.load(std::memory_order_relaxed);
   state.effective_limit_us =
       g_reflex_effective_limit_us.load(std::memory_order_relaxed);
-  if (!pacing::IsValidSourceFpsCap(state.configured_fps)) return state;
+  if (!pacing::IsValidReflexOutputFpsCap(state.configured_fps)) return state;
 
   state.requested = UserSourceCapRequested();
   if (!state.requested) {
@@ -705,13 +705,16 @@ inline UserSourceCapState ResolveUserSourceCapState() {
 }
 
 inline bool ShouldApplyLatencyGuardTarget() {
+  const uint32_t live_multiplier =
+      g_latency_guard_live_multiplier.load(std::memory_order_relaxed);
   return g_addon_enabled.load(std::memory_order_relaxed) &&
          !UserSourceCapRequested() &&
          g_latency_guard_mode.load(std::memory_order_relaxed) ==
              static_cast<unsigned int>(pacing::LatencyGuardMode::kAutomatic) &&
          g_latency_guard_auto_cap_ready.load(std::memory_order_acquire) &&
          g_latency_guard_active_source_cap_fps.load(
-             std::memory_order_relaxed) != 0;
+             std::memory_order_relaxed) != 0 &&
+         live_multiplier >= 2 && live_multiplier <= 6;
 }
 
 inline bool ShouldKeepAddonReflexTarget() {
@@ -771,9 +774,14 @@ inline sl::Result SubmitReflexOptions(const sl::ReflexOptions& native_options, b
     forwarded.frameLimitUs = pacing::PreserveStricterNativeLimit(
         native_options.frameLimitUs, explicit_target.limit_us);
   } else if (apply_latency_guard) {
-    const uint32_t guard_limit_us = pacing::TargetFpsToFrameLimitUs(
-        g_latency_guard_active_source_cap_fps.load(
-            std::memory_order_relaxed));
+    const uint32_t guard_output_target_fps =
+        pacing::SourceFpsCapToReflexOutputTargetFps(
+            g_latency_guard_active_source_cap_fps.load(
+                std::memory_order_relaxed),
+            g_latency_guard_live_multiplier.load(
+                std::memory_order_relaxed));
+    const uint32_t guard_limit_us =
+        pacing::TargetFpsToFrameLimitUs(guard_output_target_fps);
     forwarded.frameLimitUs = pacing::PreserveStricterNativeLimit(
         native_options.frameLimitUs, guard_limit_us);
   }
@@ -843,16 +851,15 @@ inline sl::Result SubmitReflexOptions(const sl::ReflexOptions& native_options, b
     const char* source_name =
         guard_changes_limit ? "Latency Guard" : "user";
     s << "mfgunlock: " << source_name
-      << " Reflex source-frame cap applied ("
+      << " Reflex output-FPS cap applied ("
       << native_options.frameLimitUs << " us -> " << forwarded.frameLimitUs
-      << " us). This limits application-rendered frames; it is not a Dynamic "
-         "MFG output-FPS target.";
+      << " us). Reflex and the DLSS-G pacer account for generated frames.";
     reshade::log::message(reshade::log::level::info, s.str().c_str());
   } else if (apply_target && result != sl::Result::eOk &&
              !g_reflex_limit_failure_logged.exchange(true,
                                                       std::memory_order_relaxed)) {
     std::stringstream s;
-    s << "mfgunlock: Reflex rejected the advanced source-frame cap with sl::Result "
+    s << "mfgunlock: Reflex rejected the output-FPS cap with sl::Result "
       << static_cast<unsigned int>(result)
       << "; native restoration could not be confirmed.";
     reshade::log::message(reshade::log::level::warning, s.str().c_str());
@@ -1188,7 +1195,7 @@ inline sl::Result CallSetOptions(const sl::ViewportHandle& viewport,
       }
       // Configuration changes originate on the overlay thread, but
       // Streamline/Reflex calls belong on the game's own submission thread.
-      // Restore a previously overridden source cap only at this safe boundary.
+      // Restore a previously overridden Reflex cap only at this safe boundary.
       if (!ShouldKeepAddonReflexTarget() &&
           g_reflex_limit_applied.load(std::memory_order_acquire)) {
         RefreshReflexTarget();
@@ -2287,7 +2294,7 @@ inline sl::Result HookedGetFeatureFunction(sl::Feature feature, const char* func
     if (!g_reflex_wrapped_logged.exchange(true, std::memory_order_relaxed)) {
       reshade::log::message(
           reshade::log::level::info,
-          "mfgunlock: wrapped slReflexSetOptions; the optional advanced source-frame cap is available.");
+          "mfgunlock: wrapped slReflexSetOptions; the optional output-FPS cap is available.");
     }
   }
   return result;

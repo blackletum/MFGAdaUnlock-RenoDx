@@ -28,6 +28,12 @@ int main() {
   CHECK(TargetFpsToFrameLimitUs(100) == 10000);
   CHECK(TargetFpsToFrameLimitUs(120) == 8333);
   CHECK(TargetFpsToFrameLimitUs(144) == 6944);
+  using mfgunlock::pacing::SourceFpsCapToReflexOutputTargetFps;
+  CHECK(SourceFpsCapToReflexOutputTargetFps(0, 4) == 0);
+  CHECK(SourceFpsCapToReflexOutputTargetFps(45, 3) == 135);
+  CHECK(SourceFpsCapToReflexOutputTargetFps(97, 4) == 388);
+  CHECK(SourceFpsCapToReflexOutputTargetFps(100, 1) == 0);
+  CHECK(SourceFpsCapToReflexOutputTargetFps(100, 7) == 0);
 
   using mfgunlock::pacing::FixedOutputCapFrameLimitUs;
   using mfgunlock::pacing::IsValidFixedOutputCap;
@@ -47,41 +53,41 @@ int main() {
   CHECK(FixedOutputCapFrameLimitUs(175, 3) == 17143);
   CHECK(FixedOutputCapFrameLimitUs(240, 0) == 0);
 
-  using mfgunlock::pacing::IsValidSourceFpsCap;
+  using mfgunlock::pacing::IsValidReflexOutputFpsCap;
   using mfgunlock::pacing::ResolveSourceCapConfig;
   using mfgunlock::pacing::SourceCapConfigOrigin;
-  CHECK(!IsValidSourceFpsCap(0));
-  CHECK(!IsValidSourceFpsCap(9));
-  CHECK(IsValidSourceFpsCap(10));
-  CHECK(IsValidSourceFpsCap(120));
-  CHECK(IsValidSourceFpsCap(1000));
-  CHECK(!IsValidSourceFpsCap(1001));
+  CHECK(!IsValidReflexOutputFpsCap(0));
+  CHECK(!IsValidReflexOutputFpsCap(9));
+  CHECK(IsValidReflexOutputFpsCap(10));
+  CHECK(IsValidReflexOutputFpsCap(120));
+  CHECK(IsValidReflexOutputFpsCap(1000));
+  CHECK(!IsValidReflexOutputFpsCap(1001));
   const auto direct_off = ResolveSourceCapConfig(
       true, 0, true, true, 165, true, 120, 4);
-  CHECK(direct_off.source_fps == 0 &&
+  CHECK(direct_off.output_fps == 0 &&
         direct_off.origin == SourceCapConfigOrigin::kConfigured);
   const auto direct = ResolveSourceCapConfig(
       true, 120, false, false, 0, false, 0, 0);
-  CHECK(direct.source_fps == 120 &&
+  CHECK(direct.output_fps == 120 &&
         direct.origin == SourceCapConfigOrigin::kConfigured);
   const auto invalid_direct_wins = ResolveSourceCapConfig(
       true, 1001, true, true, 165, true, 120, 4);
-  CHECK(invalid_direct_wins.source_fps == 0 &&
+  CHECK(invalid_direct_wins.output_fps == 0 &&
         invalid_direct_wins.origin == SourceCapConfigOrigin::kConfigured);
   const auto legacy_dynamic = ResolveSourceCapConfig(
       false, 0, true, true, 165, true, 120, 4);
-  CHECK(legacy_dynamic.source_fps == 165 &&
+  CHECK(legacy_dynamic.output_fps == 165 &&
         legacy_dynamic.origin == SourceCapConfigOrigin::kLegacyDynamic);
   const auto legacy_fixed = ResolveSourceCapConfig(
       false, 0, false, false, 0, true, 120, 4);
-  CHECK(legacy_fixed.source_fps == 30 &&
+  CHECK(legacy_fixed.output_fps == 120 &&
         legacy_fixed.origin == SourceCapConfigOrigin::kLegacyFixedOutput);
   const auto dormant_dynamic = ResolveSourceCapConfig(
       false, 0, false, true, 144, false, 0, 0);
-  CHECK(dormant_dynamic.source_fps == 144 &&
+  CHECK(dormant_dynamic.output_fps == 144 &&
         dormant_dynamic.origin == SourceCapConfigOrigin::kLegacyDynamic);
   CHECK(ResolveSourceCapConfig(false, 0, false, false, 0, true, 120, 0)
-            .source_fps == 0);
+            .output_fps == 0);
 
   using mfgunlock::pacing::BuildLatencyGuardRecommendation;
   using mfgunlock::pacing::FrameLimitUsToFps;
