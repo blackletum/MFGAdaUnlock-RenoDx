@@ -1,17 +1,32 @@
 // SPDX-License-Identifier: MIT
 #include <iostream>
+#include <algorithm>
+#include <array>
+#include <chrono>
 #include <vector>
 #include "../src/addons/mfgunlock/framecount.hpp"
 #define CHECK(x) do { if (!(x)) { std::cerr << "failed " << __LINE__ << ": " #x "\n"; return 1; } } while(0)
 namespace fc = mfgunlock::framecount;
 extern "C" __declspec(dllexport) void ReShadeLogMessage(void*, int, const char*) {}
 std::vector<uint32_t> calls;
+std::vector<uint32_t> mode_calls;
 bool reject_override = false;
+bool reject_mode_override = false;
 sl::Result Reflex(const sl::ReflexOptions& o) {
   calls.push_back(o.frameLimitUs);
-  return reject_override && o.frameLimitUs != 0 ? sl::Result::eErrorInvalidState : sl::Result::eOk;
+  mode_calls.push_back(static_cast<uint32_t>(o.mode));
+  return (reject_override && o.frameLimitUs != 0) ||
+                 (reject_mode_override &&
+                  o.mode != sl::ReflexMode::eOff)
+             ? sl::Result::eErrorInvalidState
+             : sl::Result::eOk;
 }
 sl::Result Reentrant(const sl::ReflexOptions& o) { return fc::internal::HookedReflexSetOptions(o); }
+uint32_t native_sleep_calls = 0;
+sl::Result NativeFrameSleep(const sl::FrameToken&) {
+  ++native_sleep_calls;
+  return sl::Result::eOk;
+}
 struct Frame : sl::FrameToken {
   uint32_t value;
   explicit Frame(uint32_t v):value(v) {}
@@ -114,6 +129,87 @@ int main() {
   fc::g_dynamic_applied.store(false);
   fc::g_dynamic_mfg_enabled.store(false);
   fc::g_reflex_source_fps_cap.store(0);
+
+  // Mode override changes only ReflexOptions::mode. Every other native field
+  // survives byte-for-byte, and rejection retries the exact native options.
+  native = {};
+  native.mode = sl::ReflexMode::eOff;
+  native.frameLimitUs = 0;
+  native.useMarkersToOptimize = true;
+  native.virtualKey = VK_F13;
+  native.idThread = 0x12345678u;
+  mfgunlock::reflexpacing::g_mode_override.store(
+      static_cast<uint32_t>(
+          mfgunlock::pacing::ReflexModeOverride::kOnBoost));
+  calls.clear(); mode_calls.clear();
+  CHECK(fc::internal::HookedReflexSetOptions(native) == sl::Result::eOk);
+  CHECK(calls.size() == 1 && calls[0] == 0);
+  CHECK(mode_calls.size() == 1 &&
+        mode_calls[0] ==
+            static_cast<uint32_t>(sl::ReflexMode::eLowLatencyWithBoost));
+  CHECK(fc::internal::g_last_accepted_reflex_options.useMarkersToOptimize ==
+        native.useMarkersToOptimize);
+  CHECK(fc::internal::g_last_accepted_reflex_options.virtualKey ==
+        native.virtualKey);
+  CHECK(fc::internal::g_last_accepted_reflex_options.idThread ==
+        native.idThread);
+  CHECK(mfgunlock::reflexpacing::g_mode_applied.load());
+  reject_mode_override = true;
+  mfgunlock::reflexpacing::g_mode_override.store(
+      static_cast<uint32_t>(mfgunlock::pacing::ReflexModeOverride::kOn));
+  calls.clear(); mode_calls.clear();
+  CHECK(fc::internal::HookedReflexSetOptions(native) == sl::Result::eOk);
+  CHECK(mode_calls.size() == 2);
+  CHECK(mode_calls[0] ==
+        static_cast<uint32_t>(sl::ReflexMode::eLowLatency));
+  CHECK(mode_calls[1] == static_cast<uint32_t>(sl::ReflexMode::eOff));
+  CHECK(mfgunlock::reflexpacing::g_mode_rejected.load());
+  reject_mode_override = false;
+
+  // "Off" must not submit Reflex mode Off: doing that disables DLSS-G in
+  // several integrations. Keep LowLatency as the internal dependency and
+  // bypass only slReflexSleep.
+  mfgunlock::reflexpacing::g_mode_override.store(
+      static_cast<uint32_t>(mfgunlock::pacing::ReflexModeOverride::kOff));
+  calls.clear(); mode_calls.clear();
+  CHECK(fc::internal::HookedReflexSetOptions(native) == sl::Result::eOk);
+  CHECK(mode_calls.size() == 1);
+  CHECK(mode_calls[0] ==
+        static_cast<uint32_t>(sl::ReflexMode::eLowLatency));
+  fc::internal::g_real_reflex_sleep.store(&NativeFrameSleep);
+  mfgunlock::reflexpacing::g_sleep_dispatch.store(
+      mfgunlock::reflexpacing::SleepDispatch::kBypass);
+  Frame bypass_frame(98);
+  native_sleep_calls = 0;
+  CHECK(fc::internal::HookedReflexSleep(bypass_frame) == sl::Result::eOk);
+  CHECK(native_sleep_calls == 0);
+
+  mfgunlock::reflexpacing::g_mode_override.store(
+      static_cast<uint32_t>(mfgunlock::pacing::ReflexModeOverride::kGame));
+
+  // Native/default slReflexSleep dispatch remains a single atomic branch and
+  // trampoline: no timing query, lock, allocation or waitable-object call.
+  fc::internal::g_real_reflex_sleep.store(&NativeFrameSleep);
+  mfgunlock::reflexpacing::g_sleep_dispatch.store(
+      mfgunlock::reflexpacing::SleepDispatch::kNative);
+  std::array<double, 21> native_ns{};
+  volatile uint32_t sleep_checksum = 0;
+  Frame benchmark_frame(99);
+  for (double& sample : native_ns) {
+    const auto begin = std::chrono::steady_clock::now();
+    for (uint32_t i = 0; i < 100000; ++i)
+      sleep_checksum += static_cast<uint32_t>(
+          fc::internal::HookedReflexSleep(benchmark_frame));
+    const auto end = std::chrono::steady_clock::now();
+    sample = std::chrono::duration<double, std::nano>(end - begin).count() /
+             100000.0;
+  }
+  std::sort(native_ns.begin(), native_ns.end());
+  std::cout << "native slReflexSleep wrapper: median " << native_ns[10]
+            << " ns, p95 " << native_ns[19] << " ns\n";
+  CHECK(native_ns[10] <= 50.0);
+  CHECK(native_ns[19] <= 100.0);
+  (void)sleep_checksum;
 
   // Unknown extension must reach native exactly once, never be retained/replayed.
   sl::ReflexOptions extension; native.next=&extension; calls.clear();

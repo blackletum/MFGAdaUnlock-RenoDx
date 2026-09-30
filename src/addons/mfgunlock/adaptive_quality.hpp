@@ -15,40 +15,77 @@ namespace mfgunlock::adaptivequality {
 enum class Profile : uint32_t {
   kStableV1 = 1,
   kFlickerReducedV2 = 2,
+  kLuminanceDirectionalV3 = 3,
 };
 
-inline constexpr Profile kDefaultProfile = Profile::kFlickerReducedV2;
+inline constexpr Profile kDefaultProfile = Profile::kLuminanceDirectionalV3;
 
 enum class ComponentVersion : uint32_t {
   kNative = 0,
   kV1 = 1,
   kV2 = 2,
-  kMixed = 3,
+  kV3 = 3,
+  kMixed = 4,
+};
+
+enum class Component : uint32_t {
+  kWarp,
+  kGeometry,
+  kInpaint,
 };
 
 inline constexpr Profile NormalizeProfile(uint32_t value) {
-  return value == static_cast<uint32_t>(Profile::kFlickerReducedV2)
-             ? Profile::kFlickerReducedV2
-             : Profile::kStableV1;
+  switch (value) {
+    case static_cast<uint32_t>(Profile::kFlickerReducedV2):
+      return Profile::kFlickerReducedV2;
+    case static_cast<uint32_t>(Profile::kLuminanceDirectionalV3):
+      return Profile::kLuminanceDirectionalV3;
+    default:
+      return Profile::kStableV1;
+  }
 }
 
 inline constexpr ComponentVersion SelectComponentVersion(
-    Profile requested, bool v2_available, bool v1_available) {
-  if (requested == Profile::kFlickerReducedV2 && v2_available)
+    Profile requested, bool v3_available, bool v2_available,
+    bool v1_available) {
+  if (requested == Profile::kLuminanceDirectionalV3 && v3_available)
+    return ComponentVersion::kV3;
+  if (requested != Profile::kStableV1 && v2_available)
     return ComponentVersion::kV2;
   return v1_available ? ComponentVersion::kV1
                       : ComponentVersion::kNative;
 }
 
+inline constexpr ComponentVersion ExpectedComponentVersion(
+    Profile requested, Component component) {
+  if (requested == Profile::kLuminanceDirectionalV3) {
+    // V3 deliberately keeps the validated V2 inpaint decision. Its changes
+    // are confined to warp confidence/boundaries and geometry support.
+    return component == Component::kInpaint ? ComponentVersion::kV2
+                                             : ComponentVersion::kV3;
+  }
+  return requested == Profile::kFlickerReducedV2
+             ? ComponentVersion::kV2
+             : ComponentVersion::kV1;
+}
+
 inline constexpr const char* ProfileName(Profile profile) {
-  return profile == Profile::kFlickerReducedV2 ? "Flicker-Reduced V2"
-                                               : "Stable V1";
+  switch (profile) {
+    case Profile::kLuminanceDirectionalV3:
+      return "Luminance + Directional V3";
+    case Profile::kFlickerReducedV2:
+      return "Flicker-Reduced V2";
+    default:
+      return "Stable V1";
+  }
 }
 
 inline constexpr const char* ComponentVersionName(ComponentVersion version) {
   switch (version) {
     case ComponentVersion::kMixed:
       return "mixed";
+    case ComponentVersion::kV3:
+      return "V3";
     case ComponentVersion::kV2:
       return "V2";
     case ComponentVersion::kV1:

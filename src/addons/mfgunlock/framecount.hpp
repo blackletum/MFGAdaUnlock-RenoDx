@@ -60,6 +60,7 @@
 #include "./memory_policy.hpp"
 #include "./ngx_hook.hpp"
 #include "./pacing_policy.hpp"
+#include "./reflex_pacing.hpp"
 #include "./quality_guard.hpp"
 #include "./runtime_version.hpp"
 
@@ -534,6 +535,7 @@ using SetTagFn = sl::Result (*)(const sl::ViewportHandle&, const sl::ResourceTag
 using SetTagForFrameFn = PFun_slSetTagForFrame*;
 using SetConstantsFn = PFun_slSetConstants*;
 using ReflexSetOptionsFn = PFun_slReflexSetOptions*;
+using ReflexSleepFn = PFun_slReflexSleep*;
 
 inline std::atomic<SetOptionsFn> g_real_set_options{nullptr};
 inline std::atomic<GetStateFn> g_real_get_state{nullptr};
@@ -552,9 +554,11 @@ inline SetTagFn g_real_set_tag = nullptr;
 inline SetTagForFrameFn g_real_set_tag_for_frame = nullptr;
 inline SetConstantsFn g_real_set_constants = nullptr;
 inline std::atomic<ReflexSetOptionsFn> g_real_reflex_set_options{nullptr};
+inline std::atomic<ReflexSleepFn> g_real_reflex_sleep{nullptr};
 inline std::atomic_bool g_set_options_wrapped_logged{false};
 inline std::atomic_bool g_get_state_wrapped_logged{false};
 inline std::atomic_bool g_reflex_wrapped_logged{false};
+inline std::atomic_bool g_reflex_sleep_wrapped_logged{false};
 
 inline SRWLOCK g_reflex_options_lock = SRWLOCK_INIT;
 inline sl::ReflexOptions g_last_native_reflex_options{};
@@ -580,6 +584,7 @@ enum class ReflexTargetSource : unsigned int {
   kNative = 0,
   kUserSourceCap = 1,
   kLatencyGuard = 2,
+  kVrrHeadroom = 3,
 };
 
 struct ExplicitReflexTarget {
@@ -705,6 +710,12 @@ inline UserSourceCapState ResolveUserSourceCapState() {
 }
 
 inline bool ShouldApplyLatencyGuardTarget() {
+  const auto waitable_state =
+      reflexpacing::g_waitable_state.load(std::memory_order_acquire);
+  if (waitable_state == reflexpacing::WaitableState::kProbing ||
+      waitable_state == reflexpacing::WaitableState::kActivationPending ||
+      waitable_state == reflexpacing::WaitableState::kActive)
+    return false;
   const uint32_t live_multiplier =
       g_latency_guard_live_multiplier.load(std::memory_order_relaxed);
   return g_addon_enabled.load(std::memory_order_relaxed) &&
@@ -765,39 +776,62 @@ inline sl::Result SubmitReflexOptions(const sl::ReflexOptions& native_options, b
   if (real == nullptr) return sl::Result::eErrorNotInitialized;
 
   sl::ReflexOptions forwarded = native_options;
+  reflexpacing::g_native_mode.store(static_cast<uint32_t>(native_options.mode),
+                                    std::memory_order_relaxed);
+  const auto mode_override = g_addon_enabled.load(std::memory_order_relaxed)
+      ? pacing::NormalizeReflexModeOverride(
+            reflexpacing::g_mode_override.load(std::memory_order_relaxed))
+      : pacing::ReflexModeOverride::kGame;
+  forwarded.mode = static_cast<sl::ReflexMode>(pacing::ResolveReflexMode(
+      static_cast<uint32_t>(native_options.mode), mode_override));
   const ExplicitReflexTarget explicit_target = ResolveExplicitReflexTarget();
   const bool apply_explicit_target =
       explicit_target.source != ReflexTargetSource::kNative;
   const bool apply_latency_guard =
       !apply_explicit_target && ShouldApplyLatencyGuardTarget();
-  if (apply_explicit_target) {
-    forwarded.frameLimitUs = pacing::PreserveStricterNativeLimit(
-        native_options.frameLimitUs, explicit_target.limit_us);
-  } else if (apply_latency_guard) {
+  uint32_t guard_limit_us = 0;
+  if (apply_latency_guard) {
     const uint32_t guard_output_target_fps =
         pacing::SourceFpsCapToReflexOutputTargetFps(
             g_latency_guard_active_source_cap_fps.load(
                 std::memory_order_relaxed),
             g_latency_guard_live_multiplier.load(
                 std::memory_order_relaxed));
-    const uint32_t guard_limit_us =
+    guard_limit_us =
         pacing::TargetFpsToFrameLimitUs(guard_output_target_fps);
-    forwarded.frameLimitUs = pacing::PreserveStricterNativeLimit(
-        native_options.frameLimitUs, guard_limit_us);
   }
+  const uint32_t explicit_limit_us =
+      apply_explicit_target ? explicit_target.limit_us : 0;
+  const uint32_t headroom_limit_us =
+      g_addon_enabled.load(std::memory_order_relaxed) &&
+              reflexpacing::g_headroom_enabled.load(std::memory_order_relaxed)
+          ? reflexpacing::g_headroom_limit_us.load(std::memory_order_relaxed)
+          : 0;
+  forwarded.frameLimitUs = pacing::ComposeFrameLimitUs(
+      native_options.frameLimitUs, explicit_limit_us, guard_limit_us,
+      headroom_limit_us);
   const uint32_t intended_limit_us = forwarded.frameLimitUs;
 
   const bool guard_changes_limit =
-      apply_latency_guard && forwarded.frameLimitUs != native_options.frameLimitUs;
+      guard_limit_us != 0 && forwarded.frameLimitUs == guard_limit_us &&
+      forwarded.frameLimitUs != native_options.frameLimitUs;
+  const bool headroom_changes_limit =
+      headroom_limit_us != 0 && forwarded.frameLimitUs == headroom_limit_us &&
+      forwarded.frameLimitUs != native_options.frameLimitUs;
+  const bool mode_changes = forwarded.mode != native_options.mode;
+  const bool limit_changes =
+      forwarded.frameLimitUs != native_options.frameLimitUs;
   const auto epoch = g_latency_guard_epoch.load(std::memory_order_acquire);
   if (refresh && g_last_accepted_reflex_valid && g_last_accepted_reflex_function == real &&
       g_last_accepted_reflex_epoch == epoch &&
       SameReflexOptions(forwarded, g_last_accepted_reflex_options)) return sl::Result::eOk;
   sl::Result result = real(forwarded);
+  const bool override_rejected =
+      result != sl::Result::eOk && (mode_changes || limit_changes);
   const bool user_cap_rejected = apply_explicit_target &&
       result != sl::Result::eOk &&
       forwarded.frameLimitUs != native_options.frameLimitUs;
-  if (result != sl::Result::eOk && forwarded.frameLimitUs != native_options.frameLimitUs) {
+  if (override_rejected) {
     // A rejected override is not proof that native state was preserved.
     // Retry once at the same serialized call boundary, without an override.
     result = real(native_options);
@@ -807,7 +841,7 @@ inline sl::Result SubmitReflexOptions(const sl::ReflexOptions& native_options, b
     g_latency_guard_epoch.fetch_add(1, std::memory_order_acq_rel);
     reshade::log::message(reshade::log::level::warning,
         result == sl::Result::eOk ? "mfgunlock: Reflex override rejected; native options restored."
-                                : "mfgunlock: Reflex override and native retry failed; cap state unknown.");
+                                : "mfgunlock: Reflex override and native retry failed; Reflex state unknown.");
   }
   const bool override_accepted = result == sl::Result::eOk &&
       forwarded.frameLimitUs != native_options.frameLimitUs;
@@ -821,6 +855,14 @@ inline sl::Result SubmitReflexOptions(const sl::ReflexOptions& native_options, b
   }
   g_reflex_native_limit_us.store(native_options.frameLimitUs,
                                  std::memory_order_relaxed);
+  reflexpacing::g_forwarded_mode.store(static_cast<uint32_t>(forwarded.mode),
+                                       std::memory_order_relaxed);
+  reflexpacing::g_mode_rejected.store(
+      override_rejected && mode_changes, std::memory_order_relaxed);
+  const bool mode_applied = result == sl::Result::eOk &&
+                            forwarded.mode != native_options.mode;
+  const bool was_mode_applied = reflexpacing::g_mode_applied.exchange(
+      mode_applied, std::memory_order_acq_rel);
   if (result == sl::Result::eOk)
     g_reflex_effective_limit_us.store(forwarded.frameLimitUs, std::memory_order_relaxed);
   g_reflex_limit_result.store(static_cast<unsigned int>(result),
@@ -830,15 +872,18 @@ inline sl::Result SubmitReflexOptions(const sl::ReflexOptions& native_options, b
                                      std::memory_order_relaxed);
   }
   const bool apply_target = override_accepted;
-  const unsigned int new_source =
-      result == sl::Result::eOk
-          ? (explicit_target_satisfied
-                 ? static_cast<unsigned int>(explicit_target.source)
-                 : (override_accepted
-                        ? static_cast<unsigned int>(
-                              ReflexTargetSource::kLatencyGuard)
-                        : 0u))
-          : 0u;
+  unsigned int new_source = 0;
+  if (result == sl::Result::eOk) {
+    // Preserve the public status contract for an explicit user ceiling even
+    // when the game's native ceiling is already stricter.
+    if (explicit_target_satisfied) {
+      new_source = static_cast<unsigned int>(explicit_target.source);
+    } else if (override_accepted && guard_changes_limit) {
+      new_source = static_cast<unsigned int>(ReflexTargetSource::kLatencyGuard);
+    } else if (override_accepted && headroom_changes_limit) {
+      new_source = static_cast<unsigned int>(ReflexTargetSource::kVrrHeadroom);
+    }
+  }
   const unsigned int previous_source =
       g_reflex_limit_source.exchange(new_source, std::memory_order_acq_rel);
   const bool was_applied = g_reflex_limit_applied.exchange(
@@ -848,8 +893,10 @@ inline sl::Result SubmitReflexOptions(const sl::ReflexOptions& native_options, b
       (!was_applied || previous_source != new_source)) {
     g_reflex_limit_failure_logged.store(false, std::memory_order_relaxed);
     std::stringstream s;
-    const char* source_name =
-        guard_changes_limit ? "Latency Guard" : "user";
+    const char* source_name = guard_changes_limit
+                                  ? "Latency Guard"
+                                  : (headroom_changes_limit ? "VRR headroom"
+                                                            : "user");
     s << "mfgunlock: " << source_name
       << " Reflex output-FPS cap applied ("
       << native_options.frameLimitUs << " us -> " << forwarded.frameLimitUs
@@ -867,6 +914,21 @@ inline sl::Result SubmitReflexOptions(const sl::ReflexOptions& native_options, b
     reshade::log::message(
         reshade::log::level::info,
         "mfgunlock: restored the game's native Reflex frame-limit setting.");
+  }
+  if (mode_applied && !was_mode_applied) {
+    std::stringstream s;
+    if (mode_override == pacing::ReflexModeOverride::kOff) {
+      s << "mfgunlock: FG-safe Reflex Off kept Streamline mode On so DLSS-G remains available; pacing is controlled by the sleep hook.";
+    } else {
+      const char* name = forwarded.mode == sl::ReflexMode::eLowLatency
+                             ? "On"
+                             : "On + Boost";
+      s << "mfgunlock: Reflex mode override applied: " << name << ".";
+    }
+    reshade::log::message(reshade::log::level::info, s.str().c_str());
+  } else if (!mode_applied && was_mode_applied && result == sl::Result::eOk) {
+    reshade::log::message(reshade::log::level::info,
+                          "mfgunlock: restored the game's native Reflex mode.");
   }
   return result;
 }
@@ -915,6 +977,25 @@ inline sl::Result HookedReflexSetOptions(const sl::ReflexOptions& options) {
     return result;
   }
   return SubmitReflexOptions(options);
+}
+
+inline sl::Result HookedReflexSleep(const sl::FrameToken& frame) {
+  const auto real = g_real_reflex_sleep.load(std::memory_order_acquire);
+  if (real == nullptr) return sl::Result::eErrorNotInitialized;
+  // The default steady-state path is one dispatch load and a direct call.
+  switch (reflexpacing::g_sleep_dispatch.load(std::memory_order_relaxed)) {
+    case reflexpacing::SleepDispatch::kBypass:
+      // Keep Streamline's Reflex mode enabled for the DLSS-G dependency, but
+      // remove only its pacing wait. Frame tokens and all marker calls remain
+      // untouched elsewhere in the integration.
+      return sl::Result::eOk;
+    case reflexpacing::SleepDispatch::kMeasureNative:
+      return reflexpacing::MeasureNativeSleep(frame, real);
+    case reflexpacing::SleepDispatch::kWaitable:
+      return reflexpacing::HandleSleep(frame, real);
+    default:
+      return real(frame);
+  }
 }
 
 constexpr uint32_t kUnusedViewport = (std::numeric_limits<uint32_t>::max)();
@@ -2295,6 +2376,18 @@ inline sl::Result HookedGetFeatureFunction(sl::Feature feature, const char* func
       reshade::log::message(
           reshade::log::level::info,
           "mfgunlock: wrapped slReflexSetOptions; the optional output-FPS cap is available.");
+    }
+  } else if (feature == sl::kFeatureReflex &&
+             std::strcmp(function_name, "slReflexSleep") == 0 &&
+             function != reinterpret_cast<void*>(&HookedReflexSleep)) {
+    g_real_reflex_sleep.store(reinterpret_cast<ReflexSleepFn>(function),
+                              std::memory_order_release);
+    function = reinterpret_cast<void*>(&HookedReflexSleep);
+    if (!g_reflex_sleep_wrapped_logged.exchange(true,
+                                                 std::memory_order_relaxed)) {
+      reshade::log::message(
+          reshade::log::level::info,
+          "mfgunlock: wrapped slReflexSleep; native fast path and opt-in DXGI pacing are available.");
     }
   }
   return result;

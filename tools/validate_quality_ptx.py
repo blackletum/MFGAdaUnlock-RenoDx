@@ -34,7 +34,7 @@ def validation_entry(name: str, body: str) -> str:
 {{
 .reg .pred %qv<7>;
 .reg .f32 %qf<12>;
-.reg .f32 %f<150>;
+.reg .f32 %f<200>;
 .reg .b32 %r<12>;
 {body}
 st.global.f32 [MfgUnlockQualityValidationSink], %qf0;
@@ -73,8 +73,10 @@ def main() -> None:
         + fragments("adaptive_quality.hpp", args.git_ref)[0]
     )
     v2 = "".join(fragments("adaptive_quality_v2.hpp", args.git_ref))
+    v3 = "".join(fragments("adaptive_quality_v3.hpp", args.git_ref))
     program += validation_entry("MfgUnlockQualityV1Validation", v1)
     program += validation_entry("MfgUnlockQualityV2Validation", v2)
+    program += validation_entry("MfgUnlockQualityV3Validation", v3)
 
     cuda = ctypes.WinDLL("nvcuda.dll")
     cuda.cuInit.argtypes = [ctypes.c_uint]
@@ -136,6 +138,7 @@ def main() -> None:
         for function_name in (
             b"MfgUnlockQualityV1Validation",
             b"MfgUnlockQualityV2Validation",
+            b"MfgUnlockQualityV3Validation",
         ):
             function = ctypes.c_void_p()
             check(
@@ -182,13 +185,16 @@ def main() -> None:
         source = args.git_ref or "worktree"
         print(f"quality PTX fragments ({source}) passed NVIDIA driver JIT validation")
         print(
-            "synthetic V1/V2 allocation: "
+            "synthetic V1/V2/V3 allocation: "
             f"{register_counts['MfgUnlockQualityV1Validation']}/"
-            f"{register_counts['MfgUnlockQualityV2Validation']} registers/thread"
+            f"{register_counts['MfgUnlockQualityV2Validation']}/"
+            f"{register_counts['MfgUnlockQualityV3Validation']} registers/thread"
         )
         if (register_counts["MfgUnlockQualityV2Validation"] >
                 register_counts["MfgUnlockQualityV1Validation"]):
             raise RuntimeError("V2 synthetic fragment reduced theoretical occupancy")
+        if register_counts["MfgUnlockQualityV3Validation"] > 48:
+            raise RuntimeError("V3 synthetic fragment exceeds 48 registers/thread")
         print(
             "synthetic cubin: "
             f"{text_bytes} text bytes, {shared_bytes} shared bytes, "

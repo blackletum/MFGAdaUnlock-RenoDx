@@ -151,6 +151,29 @@ def fingerprint_elf(blob: bytes) -> tuple[int, int, int]:
     return int(text), int(shared), int(registers)
 
 
+def local_storage_bytes(blob: bytes) -> int:
+    """Return statically allocated CUDA local storage (spill/stack) bytes."""
+    if len(blob) < 0x40 or blob[:4] != b"\x7fELF":
+        raise ValueError("not an ELF cubin")
+    section_offset = struct.unpack_from("<Q", blob, 0x28)[0]
+    section_size, section_count, string_index = struct.unpack_from(
+        "<HHH", blob, 0x3A
+    )
+    if section_size < 0x40 or string_index >= section_count:
+        raise ValueError("invalid ELF section table")
+    string_header = section_offset + string_index * section_size
+    strings = struct.unpack_from("<Q", blob, string_header + 0x18)[0]
+    total = 0
+    for index in range(section_count):
+        section = section_offset + index * section_size
+        name_offset = struct.unpack_from("<I", blob, section)[0]
+        end = blob.find(b"\0", strings + name_offset)
+        name = blob[strings + name_offset:end]
+        if name.startswith(b".nv.local"):
+            total += struct.unpack_from("<Q", blob, section + 0x20)[0]
+    return int(total)
+
+
 def fnv1a64(data: bytes) -> int:
     value = 0xCBF29CE484222325
     for byte in data:
@@ -195,6 +218,12 @@ _SILHOUETTE_NEIGHBORS = {
             ("%f97", "%f98", "%f99"),
             ("%f120", "%f121", "%f122"),
         ],
+        "diagonals": {
+            "same": (("%f41", "%f42", "%f43"),
+                     ("%f131", "%f132", "%f133")),
+            "opposite": (("%f109", "%f110", "%f111"),
+                         ("%f66", "%f67", "%f68")),
+        },
         "length": "%f14",
         "reload": "",
     },
@@ -207,6 +236,12 @@ _SILHOUETTE_NEIGHBORS = {
             ("%f882", "%f883", "%f884"),
             ("%f905", "%f906", "%f907"),
         ],
+        "diagonals": {
+            "same": (("%f826", "%f827", "%f828"),
+                     ("%f916", "%f917", "%f918")),
+            "opposite": (("%f894", "%f895", "%f896"),
+                         ("%f851", "%f852", "%f853")),
+        },
         "length": "%f22",
         "reload": (
             "ld.param.f32 %f2, "
@@ -440,6 +475,279 @@ def patch_adaptive_geometry_v2(source: str) -> str:
     return source.replace(final, consensus)
 
 
+def _diagonal_support_program(direction: str) -> str:
+    spec = _SILHOUETTE_NEIGHBORS[direction]
+    center_x, center_y, center_depth = spec["center"]
+    same = spec["diagonals"]["same"]
+    opposite = spec["diagonals"]["opposite"]
+    done = f"MFGUNLOCK_GEOMETRY_DIAGONALS_DONE_{direction.upper()}_V3"
+    lines = [
+        f"// MFGUNLOCK_CONTINUOUS_DIAGONAL_SUPPORT_{direction.upper()}_V31",
+        # Below half a pixel there is no stable direction from which to select
+        # a diagonal pair. Cardinal weights are also exactly one there.
+        f"@%qgp1 bra {done};",
+        # Fade diagonal help out continuously as the second cardinal becomes
+        # decisive: one through 0.35 and zero from 0.60.
+        "sub.f32 %qgf3, %qgf1, 0f3EB33333;",
+        "mul.sat.f32 %qgf3, %qgf3, 0f40800000;",
+        "fma.rn.f32 %qgf4, %qgf3, 0fC0000000, 0f40400000;",
+        "mul.f32 %qgf3, %qgf3, %qgf3;",
+        "mul.f32 %qgf3, %qgf3, %qgf4;",
+        "sub.f32 %qgf8, 0f3F800000, %qgf3;",
+        # Fade the hard diagonal ratio gate over 0.30..0.60. qgf9/qgf10
+        # retain the normalized absolute motion components.
+        "max.f32 %qgf3, %qgf9, %qgf10;",
+        "min.f32 %qgf4, %qgf9, %qgf10;",
+        "max.f32 %qgf3, %qgf3, 0f358637BD;",
+        "div.approx.f32 %qgf4, %qgf4, %qgf3;",
+        "sub.f32 %qgf4, %qgf4, 0f3E99999A;",
+        "mul.sat.f32 %qgf4, %qgf4, 0f40555555;",
+        "fma.rn.f32 %qgf3, %qgf4, 0fC0000000, 0f40400000;",
+        "mul.f32 %qgf4, %qgf4, %qgf4;",
+        "mul.f32 %qgf4, %qgf4, %qgf3;",
+        "mul.f32 %qgf8, %qgf8, %qgf4;",
+        "mul.f32 %qgf8, %qgf8, %qgf11;",
+        "setp.le.f32 %qgp0, %qgf8, 0f00000000;",
+        f"@%qgp0 bra {done};",
+        # Same-sign motion selects TL/BR; opposite-sign selects TR/BL.
+        f"mul.f32 %qgf3, {center_x}, {center_y};",
+        "setp.ge.f32 %qgp0, %qgf3, 0f00000000;",
+    ]
+    for index in range(2):
+        same_x, same_y, same_depth = same[index]
+        opposite_x, opposite_y, opposite_depth = opposite[index]
+        lines += [
+            f"selp.f32 %qgf3, {same_x}, {opposite_x}, %qgp0;",
+            f"sub.ftz.f32 %qgf3, %qgf3, {center_x};",
+            f"selp.f32 %qgf4, {same_y}, {opposite_y}, %qgp0;",
+            f"sub.ftz.f32 %qgf4, %qgf4, {center_y};",
+            "mul.ftz.f32 %qgf5, %qgf4, %qgf4;",
+            "fma.rn.ftz.f32 %qgf5, %qgf3, %qgf3, %qgf5;",
+            "mul.ftz.f32 %qgf6, %qgf5, %qgf2;",
+            "sub.ftz.sat.f32 %qgf6, 0f3F800000, %qgf6;",
+            f"selp.f32 %qgf7, {same_depth}, {opposite_depth}, %qgp0;",
+            f"sub.ftz.f32 %qgf7, %qgf7, {center_depth};",
+            "sub.sat.f32 %qgf7, 0f40400000, %qgf7;",
+            "min.f32 %qgf6, %qgf6, %qgf7;",
+        ]
+        if index == 0:
+            lines.append("mov.f32 %qgf11, %qgf6;")
+        else:
+            lines += [
+                # Both opposite sides of the selected diagonal must agree.
+                "min.f32 %qgf6, %qgf6, %qgf11;",
+                "mul.f32 %qgf6, %qgf6, %qgf8;",
+                "min.f32 %qgf7, %qgf0, %qgf6;",
+                "max.f32 %qgf1, %qgf1, %qgf7;",
+                "max.f32 %qgf0, %qgf0, %qgf6;",
+            ]
+    lines.append(f"{done}:")
+    return "\n".join(lines) + "\n"
+
+
+def _temporal_history_program(direction: str) -> str:
+    """Conservatively stabilize addon support for one motion direction.
+
+    The host validates phase and dimensions and publishes a byte-addressed
+    plane through the module-local control symbol. A missing/disabled control
+    is an exact local-only fast path. History stores confidence, never color,
+    depth, or motion vectors.
+    """
+    direction_index = 0 if direction == "curr_to_prev" else 1
+    suffix = direction.upper()
+    done = f"MFGUNLOCK_TEMPORAL_HISTORY_DONE_{suffix}_V31"
+    first = f"MFGUNLOCK_TEMPORAL_HISTORY_FIRST_{suffix}_V31"
+    lines = [
+        f"// MFGUNLOCK_TEMPORAL_GEOMETRY_{suffix}_V31",
+        "ld.global.u32 %qgr0, [mfgunlock_v31_history_control+8];",
+        "setp.eq.u32 %qgp0, %qgr0, 1;",
+        f"@!%qgp0 bra {done};",
+        "ld.global.u64 %qgrd0, [mfgunlock_v31_history_control];",
+        "setp.ne.u64 %qgp0, %qgrd0, 0;",
+        f"@!%qgp0 bra {done};",
+        "ld.global.v4.u32 {%qgr1, %qgr2, %qgr3, %qgr5}, [mfgunlock_v31_history_control+16];",
+        "setp.eq.u32 %qgp0, %qgr1, %r78;",
+        "setp.eq.u32 %qgp1, %qgr2, %r79;",
+        "and.pred %qgp0, %qgp0, %qgp1;",
+        f"@!%qgp0 bra {done};",
+        # Derive the phase bucket from the provider's verified interpolation
+        # parameter. The host publishes N only after observing every expected
+        # phase; no launch counter or motion-derived estimate is used.
+        "cvt.rn.f32.u32 %qgf3, %qgr3;",
+        "mul.f32 %qgf3, %f1, %qgf3;",
+        "cvt.rni.u32.f32 %qgr4, %qgf3;",
+        "sub.u32 %qgr2, %qgr3, %qgr4;",
+        "setp.gt.u32 %qgp1, %qgr4, %qgr2;",
+        "min.u32 %qgr3, %qgr4, %qgr2;",
+        "add.u32 %qgr3, %qgr3, -1;",
+        "selp.u32 %qgr4, 1, 0, %qgp1;",
+        f"xor.b32 %qgr4, %qgr4, {direction_index};",
+        "mad.lo.u32 %qgr3, %qgr3, 2, %qgr4;",
+        "mul.lo.u32 %qgr3, %qgr3, %qgr5;",
+        "mad.lo.u32 %qgr5, %r99, %qgr1, %r98;",
+        "add.u32 %qgr3, %qgr3, %qgr5;",
+        "cvt.u64.u32 %qgrd1, %qgr3;",
+        "add.u64 %qgrd1, %qgrd0, %qgrd1;",
+        "ld.global.u8 %qgr0, [%qgrd1];",
+        "mul.f32 %qgf3, %qgf0, 0f40000000;",
+        "setp.eq.u32 %qgp0, %qgr0, 255;",
+        f"@%qgp0 bra {first};",
+        "cvt.rn.f32.u32 %qgf4, %qgr0;",
+        "mul.f32 %qgf4, %qgf4, 0f3B810204;",
+        # A symmetric phase visits the same byte with directions exchanged.
+        # Permit recovery only on k <= N-k; the paired second visit may lower
+        # confidence immediately but cannot add another 0.20 in this source
+        # frame. This remains correct for ascending or descending phase order.
+        "@%qgp1 min.f32 %qgf3, %qgf3, %qgf4;",
+        "@!%qgp1 add.f32 %qgf4, %qgf4, 0f3E4CCCCD;",
+        "@!%qgp1 min.f32 %qgf3, %qgf3, %qgf4;",
+        f"{first}:",
+        "mul.f32 %qgf0, %qgf3, 0f3F000000;",
+        "mul.f32 %qgf3, %qgf3, 0f437E0000;",
+        "cvt.rni.u32.f32 %qgr0, %qgf3;",
+        "min.u32 %qgr0, %qgr0, 254;",
+        "st.global.u8 [%qgrd1], %qgr0;",
+        f"{done}:",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def patch_adaptive_geometry_v3(source: str, temporal: bool = True) -> str:
+    """Orient cardinal support and add a gated pair of existing diagonals.
+
+    The provider has already loaded the complete 3x3 tile into registers. This
+    patch only consumes those values and never introduces another load.
+    """
+    source = patch_adaptive_geometry_v2(source)
+    if temporal:
+        source = replace_once(
+            source,
+            ".address_size 64\n",
+            ".address_size 64\n\n"
+            ".visible .global .align 4 .u32 mfgunlock_v31_history_magic = "
+            "0x56333148;\n"
+            ".visible .global .align 16 .b8 mfgunlock_v31_history_control[32];\n",
+            "adaptive geometry V3.1 temporal globals",
+        )
+        source = replace_once(
+            source,
+            ".reg .f32 %qgf<12>;\n",
+            ".reg .f32 %qgf<12>;\n"
+            ".reg .b32 %qgr<6>;\n"
+            ".reg .b64 %qgrd<2>;\n",
+            "adaptive geometry V3.1 temporal registers",
+        )
+    source = replace_once(
+        source,
+        "// MFGUNLOCK_TWO_NEIGHBOR_CONFIDENCE_V2\n",
+        "// MFGUNLOCK_TWO_NEIGHBOR_CONFIDENCE_V2\n"
+        "// MFGUNLOCK_ORIENTED_GEOMETRY_V3\n",
+        "adaptive geometry V3 marker",
+    )
+    normalization_anchor = "rcp.approx.ftz.f32 %qgf2, %qgf2;\n"
+    normalization = (
+        normalization_anchor
+        + "sqrt.approx.ftz.f32 %qgf8, {length};\n"
+        + "setp.le.f32 %qgp1, %qgf8, 0f3F000000;\n"
+        + "max.f32 %qgf3, %qgf8, 0f358637BD;\n"
+        + "rcp.approx.ftz.f32 %qgf3, %qgf3;\n"
+        + "abs.f32 %qgf9, {center_x};\n"
+        + "mul.f32 %qgf9, %qgf9, %qgf3;\n"
+        + "abs.f32 %qgf10, {center_y};\n"
+        + "mul.f32 %qgf10, %qgf10, %qgf3;\n"
+        + "sub.f32 %qgf11, %qgf8, 0f3F000000;\n"
+        + "mul.sat.f32 %qgf11, %qgf11, 0f3F800000;\n"
+        + "fma.rn.f32 %qgf3, %qgf11, 0fC0000000, 0f40400000;\n"
+        + "mul.f32 %qgf11, %qgf11, %qgf11;\n"
+        + "mul.f32 %qgf11, %qgf11, %qgf3;\n"
+    )
+    offset = 0
+    for direction in ("curr_to_prev", "prev_to_curr"):
+        index = source.find(normalization_anchor, offset)
+        if index < 0:
+            raise ValueError(f"adaptive geometry V3: {direction} normalization missing")
+        spec = _SILHOUETTE_NEIGHBORS[direction]
+        replacement = normalization.format(
+            length=spec["length"], center_x=spec["center"][0],
+            center_y=spec["center"][1]
+        )
+        source = source[:index] + replacement + source[index + len(normalization_anchor):]
+        offset = index + len(replacement)
+    if source.find(normalization_anchor, offset) >= 0:
+        raise ValueError("adaptive geometry V3: unexpected normalization anchor")
+
+    update = (
+        "min.f32 %qgf6, %qgf6, %qgf7;\n"
+        "min.f32 %qgf8, %qgf0, %qgf6;\n"
+        "max.f32 %qgf1, %qgf1, %qgf8;\n"
+        "max.f32 %qgf0, %qgf0, %qgf6;\n"
+    )
+    components = ("%qgf9", "%qgf10", "%qgf10", "%qgf9") * 2
+    offset = 0
+    for component in components:
+        index = source.find(update, offset)
+        if index < 0:
+            raise ValueError("adaptive geometry V3: cardinal update missing")
+        weighted = (
+            "min.f32 %qgf6, %qgf6, %qgf7;\n"
+            f"sub.f32 %qgf8, 0f3F800000, {component};\n"
+            "mul.f32 %qgf8, %qgf8, %qgf11;\n"
+            "fma.rn.f32 %qgf8, %qgf8, 0fBE800000, 0f3F800000;\n"
+            "mul.f32 %qgf6, %qgf6, %qgf8;\n"
+            "min.f32 %qgf8, %qgf0, %qgf6;\n"
+            "max.f32 %qgf1, %qgf1, %qgf8;\n"
+            "max.f32 %qgf0, %qgf0, %qgf6;\n"
+        )
+        source = source[:index] + weighted + source[index + len(update):]
+        offset = index + len(weighted)
+    if source.find(update, offset) >= 0:
+        raise ValueError("adaptive geometry V3: unexpected cardinal update")
+
+    confidence = "// MFGUNLOCK_GEOMETRY_CONFIDENCE_V2\n"
+    offset = 0
+    for direction in ("curr_to_prev", "prev_to_curr"):
+        index = source.find(confidence, offset)
+        if index < 0:
+            raise ValueError(f"adaptive geometry V3: {direction} confidence missing")
+        diagonal = _diagonal_support_program(direction)
+        source = source[:index] + diagonal + source[index:]
+        offset = index + len(diagonal) + len(confidence)
+    # Isolated evidence retains only one eighth of the native divisor
+    # relaxation; two coherent supports still reach the V2 half relaxation.
+    consensus = (
+        "fma.rn.f32 %qgf6, %qgf1, 0f3E800000, 0f3E800000;\n"
+    )
+    stable_consensus = (
+        "fma.rn.f32 %qgf6, %qgf1, 0f3EC00000, 0f3E000000;\n"
+    )
+    if source.count(consensus) != 2:
+        raise ValueError("adaptive geometry V3.1: consensus anchors changed")
+    source = source.replace(consensus, stable_consensus)
+    if temporal:
+        history_anchor = stable_consensus + "mul.f32 %qgf0, %qgf0, %qgf6;\n"
+        offset = 0
+        for direction in ("curr_to_prev", "prev_to_curr"):
+            index = source.find(history_anchor, offset)
+            if index < 0:
+                raise ValueError(
+                    f"adaptive geometry V3.1: {direction} history anchor missing")
+            insertion = history_anchor + _temporal_history_program(direction)
+            source = (source[:index] + insertion +
+                      source[index + len(history_anchor):])
+            offset = index + len(insertion)
+        if source.find(history_anchor, offset) >= 0:
+            raise ValueError("adaptive geometry V3.1: unexpected history anchor")
+    return source
+
+
+def patch_adaptive_geometry_v31_local(source: str) -> str:
+    return patch_adaptive_geometry_v3(source, temporal=False)
+
+
+def patch_adaptive_geometry_v31_temporal(source: str) -> str:
+    return patch_adaptive_geometry_v3(source, temporal=True)
+
+
 def patch_adaptive_inpaint_decision_v1(source: str) -> str:
     """Fail closed when the provider's inpaint-need mask is unordered.
 
@@ -658,6 +966,82 @@ def patch_adaptive_blend_v2(source: str) -> str:
                         "candidate arbitration V2")
 
 
+def patch_adaptive_blend_v3(source: str) -> str:
+    source = patch_adaptive_blend_v2(source)
+    relative, smooth_v3, border_distances_v3, border_v3, arbitration_v3 = (
+        _fragment("adaptive_quality_v3.hpp", index) for index in range(5)
+    )
+    absolute = (
+        "sub.f32 %qf6, %f115, %f119;\n"
+        "sub.f32 %qf7, %f116, %f120;\n"
+        "sub.f32 %qf8, %f117, %f121;\n"
+        "abs.f32 %qf6, %qf6;\n"
+        "abs.f32 %qf7, %qf7;\n"
+        "abs.f32 %qf8, %qf8;\n"
+        "add.f32 %qf6, %qf6, %qf7;\n"
+        "add.f32 %qf6, %qf6, %qf8;\n"
+        "sub.f32 %qf9, %f125, %f131;\n"
+        "sub.f32 %qf10, %f126, %f132;\n"
+        "sub.f32 %qf11, %f127, %f133;\n"
+        "abs.f32 %qf9, %qf9;\n"
+        "abs.f32 %qf10, %qf10;\n"
+        "abs.f32 %qf11, %qf11;\n"
+        "add.f32 %qf9, %qf9, %qf10;\n"
+        "add.f32 %qf9, %qf9, %qf11;\n"
+    )
+    smooth_v2, border_v2, arbitration_v2 = (
+        _fragment("adaptive_quality_v2.hpp", index) for index in range(3)
+    )
+    source = replace_once(source, absolute, border_distances_v3 + relative,
+                          "relative photometric error V3")
+    source = replace_once(source, smooth_v2, smooth_v3,
+                          "smooth confidence V3")
+    source = replace_once(source, border_v2, border_v3,
+                          "directional border V3")
+    source = replace_once(source, arbitration_v2, arbitration_v3,
+                          "candidate arbitration V3")
+    source = replace_once(source, ".reg .f32 %qf<12>;\n",
+                          ".reg .f32 %qf<8>;\n",
+                          "quality V3 register declaration")
+    return replace_once(source, "MFGUNLOCK_VALIDATED_WARP_BLEND_V2",
+                        "MFGUNLOCK_VALIDATED_WARP_BLEND_V3",
+                        "validated warp V3 marker")
+
+
+def patch_adaptive_blend_v3_photometric_only(source: str) -> str:
+    """Diagnostic/default-profile A/B: V3 photometry with the V2 border."""
+    source = patch_adaptive_blend_v3(source)
+    border_v2 = _fragment("adaptive_quality_v2.hpp", 1)
+    border_distances_v3 = _fragment("adaptive_quality_v3.hpp", 2)
+    border_v3 = _fragment("adaptive_quality_v3.hpp", 3)
+    source = replace_once(source, border_distances_v3, "",
+                          "V3 photometric-only border distances")
+    return replace_once(source, border_v3, border_v2,
+                        "V3 photometric-only border confidence")
+
+
+def patch_adaptive_blend_v3_directional_only(source: str) -> str:
+    """Diagnostic/default-profile A/B: V2 photometry with the V3 border."""
+    source = patch_adaptive_blend_v2(source)
+    border_v2 = _fragment("adaptive_quality_v2.hpp", 1)
+    border_distances_v3 = _fragment("adaptive_quality_v3.hpp", 2)
+    border_v3 = _fragment("adaptive_quality_v3.hpp", 3)
+    smooth_v2 = _fragment("adaptive_quality_v2.hpp", 0)
+    anchors = (
+        "// MFGUNLOCK_V2_NATIVE_ANCHORS_FOR_DIRECTIONAL_BORDER_V3\n"
+        "add.sat.f32 %f174, %f148, 0f00000000;\n"
+        "add.sat.f32 %f175, %f149, 0f00000000;\n"
+    )
+    absolute_anchor = "sub.f32 %qf6, %f115, %f119;\n"
+    source = replace_once(source, absolute_anchor,
+                          border_distances_v3 + absolute_anchor,
+                          "V3 directional-only border distances")
+    source = replace_once(source, smooth_v2, anchors + smooth_v2,
+                          "V3 directional-only native anchors")
+    return replace_once(source, border_v2, border_v3,
+                        "V3 directional-only border confidence")
+
+
 PATCHERS = {
     "Kernel_EstimatePrev2CurrScatter": ("previous_scatter", patch_previous_scatter, ADA_ARCH),
     "Kernel_EstimateIntermMvecsScatter": ("intermediate_scatter", patch_intermediate_scatter, BLACKWELL_ARCH),
@@ -671,10 +1055,13 @@ EXTRA_PATCHERS = {
         ("validated_warp_blend_refined_border", patch_refined_border_blend),
         ("adaptive_quality_blend_v1", patch_adaptive_blend),
         ("adaptive_quality_blend_v2", patch_adaptive_blend_v2),
+        ("adaptive_quality_blend_v3", patch_adaptive_blend_v3),
     ],
     "Kernel_EstimateIntermMvecsScatter": [
         ("adaptive_quality_geometry_v1", patch_adaptive_geometry_v1),
         ("adaptive_quality_geometry_v2", patch_adaptive_geometry_v2),
+        ("adaptive_quality_geometry_v31_local", patch_adaptive_geometry_v31_local),
+        ("adaptive_quality_geometry_v31_temporal", patch_adaptive_geometry_v31_temporal),
         ("geometry_support_smooth_v2", patch_geometry_confidence_v2),
         ("geometry_motion_depth_refined", patch_refined_geometry),
         ("geometry_motion_depth", patch_silhouette_boundary_guard),
@@ -779,13 +1166,43 @@ def compile_ptx(ptxas: Path | None, driver: CudaDriverCompiler | None,
     source_path = directory / f"{name}.ptx"
     cubin_path = directory / f"{name}.cubin"
     source_path.write_text(source, encoding="ascii", newline="\n")
+    command = [str(ptxas), "-arch=sm_89", "-O3", "-v"]
+    if name in {"adaptive_quality_geometry_v31_local",
+                "adaptive_quality_geometry_v31_temporal"}:
+        # Forty registers is the Ada occupancy boundary for this 324-thread
+        # kernel. Override the provider's permissive directive, but retain the
+        # hard zero-spill/local-storage gate below.
+        command += ["--warn-on-spills", "--override-directive-values",
+                    "-maxrregcount=40"]
+    command += [str(source_path), "-o", str(cubin_path)]
     result = subprocess.run(
-        [str(ptxas), "-arch=sm_89", "-O3", "-v", str(source_path), "-o", str(cubin_path)],
+        command,
         capture_output=True,
         text=True,
     )
     if result.returncode:
-        raise RuntimeError(f"ptxas failed for {name}:\n{result.stderr}")
+        raise RuntimeError(
+            f"ptxas failed for {name}:\n{result.stdout}\n{result.stderr}"
+        )
+    if name in {"adaptive_quality_geometry_v31_local",
+                "adaptive_quality_geometry_v31_temporal"}:
+        diagnostics = result.stdout + "\n" + result.stderr
+        spill = re.search(
+            r"(\d+) bytes spill stores,\s*(\d+) bytes spill loads",
+            diagnostics,
+        )
+        stack = re.search(r"(\d+) bytes stack frame", diagnostics)
+        if spill is None or stack is None:
+            raise RuntimeError(
+                f"ptxas did not report stack/spill counts for {name}"
+            )
+        if (int(stack.group(1)) != 0 or int(spill.group(1)) != 0 or
+                int(spill.group(2)) != 0):
+            raise RuntimeError(
+                f"{name} uses ptxas stack/spills: "
+                f"stack={stack.group(1)}, stores={spill.group(1)}, "
+                f"loads={spill.group(2)}"
+            )
     print(f"  compiler resources [{name}]:\n{result.stdout.strip()}\n{result.stderr.strip()}")
     print(f"  ELF text/shared/registers [{name}]: {fingerprint_elf(cubin_path.read_bytes())}")
     return cubin_path.read_bytes()
@@ -915,6 +1332,14 @@ def main() -> None:
         help="keep every existing cubin byte-exact and append only new variants",
     )
     parser.add_argument("--inspect", action="store_true")
+    parser.add_argument(
+        "--allow-oversized-v3", action="store_true",
+        help=(
+            "emit a zero-spill geometry V3 cubin even when it exceeds the "
+            "in-place slot/resource gate; the runtime must install it through "
+            "an exact fatbin descriptor redirect"
+        ),
+    )
     args = parser.parse_args()
 
     existing = []
@@ -954,13 +1379,105 @@ def main() -> None:
                     variants.extend(EXTRA_PATCHERS.get(name, []))
                     for variant_name, variant_patcher in variants:
                         patched_source = variant_patcher(baseline_source)
-                        replacement = compile_ptx(
-                            args.ptxas, driver, patched_source, directory,
-                            variant_name)
+                        is_v31_local = (
+                            variant_name == "adaptive_quality_geometry_v31_local")
+                        is_v31_temporal = (
+                            variant_name == "adaptive_quality_geometry_v31_temporal")
+                        is_v31_geometry = is_v31_local or is_v31_temporal
+                        load_reference = (
+                            patch_adaptive_geometry_v2(baseline_source)
+                            if is_v31_geometry
+                            else baseline_source
+                        )
+                        if (variant_name == "adaptive_quality_blend_v3" and
+                                patched_source.count("ld.") !=
+                                load_reference.count("ld.")):
+                            raise ValueError(
+                                f"{variant_name}: V3 introduced a load"
+                            )
+                        if is_v31_local:
+                            if (patched_source.count("tex.") !=
+                                    load_reference.count("tex.") or
+                                    patched_source.count("ld.global") !=
+                                    load_reference.count("ld.global") or
+                                    patched_source.count("st.global") !=
+                                    load_reference.count("st.global")):
+                                raise ValueError(
+                                    f"{variant_name}: local cubin introduced a global or texture access"
+                                )
+                        if is_v31_temporal:
+                            if (patched_source.count("tex.") !=
+                                    load_reference.count("tex.") or
+                                    patched_source.count("ld.global") !=
+                                    load_reference.count("ld.global") + 8 or
+                                    patched_source.count("ld.global.u8") !=
+                                    load_reference.count("ld.global.u8") + 2 or
+                                    patched_source.count("st.global.u8") !=
+                                    load_reference.count("st.global.u8") + 2):
+                                raise ValueError(
+                                    f"{variant_name}: compact temporal load/store gate failed"
+                                )
+                        try:
+                            replacement = compile_ptx(
+                                args.ptxas, driver, patched_source, directory,
+                                variant_name)
+                        except RuntimeError as error:
+                            if not is_v31_temporal or args.ptxas is None:
+                                raise
+                            print(
+                                "  skip adaptive_quality_geometry_v31_temporal: "
+                                "ptxas gate failed; the separately generated Local Stable cubin remains available:\n"
+                                f"{error}"
+                            )
+                            continue
+                        replacement_fingerprint = fingerprint_elf(replacement)
+                        replacement_local = local_storage_bytes(replacement)
+                        if variant_name == "adaptive_quality_blend_v3":
+                            if replacement_fingerprint[2] > 48 or replacement_local:
+                                raise ValueError(
+                                    "adaptive_quality_blend_v3 exceeds its "
+                                    "48-register/zero-local-storage gate: "
+                                    f"fp={replacement_fingerprint}, "
+                                    f"local={replacement_local}"
+                                )
+                        if is_v31_geometry:
+                            if args.ptxas is None:
+                                print(
+                                    f"  skip {variant_name}: "
+                                    "driver JIT is validation-only; release "
+                                    "geometry requires ptxas"
+                                )
+                                continue
+                            text, shared, registers = replacement_fingerprint
+                            text_limit = 39552 if is_v31_local else 0xFFFFFFFF
+                            resource_gate_failed = (
+                                (is_v31_local and text > text_limit) or
+                                shared != 7776 or registers > 40 or
+                                replacement_local
+                            )
+                            if resource_gate_failed and not args.allow_oversized_v3:
+                                print(
+                                    f"  skip {variant_name}: "
+                                    "resource gate failed "
+                                    f"size={len(replacement)}, fp="
+                                    f"{replacement_fingerprint}, "
+                                    f"local={replacement_local}"
+                                )
+                                continue
+                            if resource_gate_failed:
+                                print(
+                                    f"  keep {variant_name} as "
+                                    "redirect-only ptxas cubin: "
+                                    f"size={len(replacement)}, fp="
+                                    f"{replacement_fingerprint}, "
+                                    f"local={replacement_local}"
+                                )
                         if len(baseline) > len(ada_cubin):
                             print(f"  skip {variant_name}: baseline {len(baseline)} > slot {len(ada_cubin)}")
                             continue
-                        if len(replacement) > len(ada_cubin):
+                        if (len(replacement) > len(ada_cubin) and not
+                                (is_v31_geometry and
+                                 args.allow_oversized_v3)):
                             print(f"  skip {variant_name}: replacement {len(replacement)} > slot {len(ada_cubin)}")
                             continue
                         key = (variant_name, fingerprint_elf(ada_cubin), len(ada_cubin), fnv1a64(ada_cubin))

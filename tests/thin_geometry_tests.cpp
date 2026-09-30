@@ -86,6 +86,55 @@ int main() {
         std::string::npos);
   CHECK(adaptive_v2.find("setp.ge.f32 %qv5, %f148, 0f3E4CCCCD;") ==
         std::string::npos);
+
+  g_adaptive_quality_profile =
+      mfgunlock::adaptivequality::Profile::kLuminanceDirectionalV3;
+  g_adaptive_quality_v3_photometric = true;
+  g_adaptive_quality_v3_directional_border = true;
+  std::string adaptive_v3 = ".entry Kernel_BlendCandidatesFused(\n.reg .pred %p<260>;\nld.param.u8 %rs8, [%rd6+220];\n";
+  CHECK(internal::RewriteValidatedWarpBlend(
+      adaptive_v3,
+      mfgunlock::adaptivequality::Profile::kLuminanceDirectionalV3, why));
+  CHECK(adaptive_v3.find("MFGUNLOCK_VALIDATED_WARP_BLEND_V3") !=
+        std::string::npos);
+  CHECK(adaptive_v3.find("MFGUNLOCK_RELATIVE_PHOTOMETRIC_ERROR_V3") !=
+        std::string::npos);
+  CHECK(adaptive_v3.find("MFGUNLOCK_SMOOTH_WARP_CONFIDENCE_V3") !=
+        std::string::npos);
+  CHECK(adaptive_v3.find("MFGUNLOCK_DIRECTIONAL_BORDER_DISTANCES_V31") !=
+        std::string::npos);
+  CHECK(adaptive_v3.find("MFGUNLOCK_DIRECTIONAL_BORDER_CONFIDENCE_V3") !=
+        std::string::npos);
+  CHECK(adaptive_v3.find("MFGUNLOCK_RELATIVE_CANDIDATE_ARBITRATION_V3") !=
+        std::string::npos);
+  CHECK(adaptive_v3.find("0f3E59B3D0") != std::string::npos);
+  CHECK(adaptive_v3.find("0f3D800000") != std::string::npos);
+
+  g_adaptive_quality_v3_photometric = false;
+  g_adaptive_quality_v3_directional_border = false;
+  std::string adaptive_v3_ab = ".entry Kernel_BlendCandidatesFused(\n.reg .pred %p<260>;\nld.param.u8 %rs8, [%rd6+220];\n";
+  CHECK(internal::RewriteValidatedWarpBlend(
+      adaptive_v3_ab,
+      mfgunlock::adaptivequality::Profile::kLuminanceDirectionalV3, why));
+  CHECK(adaptive_v3_ab.find("MFGUNLOCK_RELATIVE_PHOTOMETRIC_ERROR_V3") ==
+        std::string::npos);
+  CHECK(adaptive_v3_ab.find("MFGUNLOCK_SMOOTH_WARP_CONFIDENCE_V2") !=
+        std::string::npos);
+  CHECK(adaptive_v3_ab.find("MFGUNLOCK_BORDER_CONFIDENCE_V2") !=
+        std::string::npos);
+  g_adaptive_quality_v3_directional_border = true;
+  std::string adaptive_v3_directional = ".entry Kernel_BlendCandidatesFused(\n.reg .pred %p<260>;\nld.param.u8 %rs8, [%rd6+220];\n";
+  CHECK(internal::RewriteValidatedWarpBlend(
+      adaptive_v3_directional,
+      mfgunlock::adaptivequality::Profile::kLuminanceDirectionalV3, why));
+  CHECK(adaptive_v3_directional.find(
+            "MFGUNLOCK_V2_NATIVE_ANCHORS_FOR_DIRECTIONAL_BORDER_V3") !=
+        std::string::npos);
+  CHECK(adaptive_v3_directional.find(
+            "MFGUNLOCK_DIRECTIONAL_BORDER_CONFIDENCE_V3") !=
+        std::string::npos);
+  g_adaptive_quality_v3_photometric = true;
+  g_adaptive_quality_v3_directional_border = true;
   g_adaptive_quality_enabled = false;
   g_adaptive_quality_profile =
       mfgunlock::adaptivequality::Profile::kStableV1;
@@ -98,6 +147,10 @@ int main() {
   CHECK(attenuated >= 0.2f && attenuated < unchanged);
 
   IMAGE_NT_HEADERS64 headers{};
+  headers.FileHeader.TimeDateStamp = 0x6A8745ADu;
+  headers.OptionalHeader.SizeOfImage = 7565312u;
+  CHECK(internal::MatchProvider(&headers) != nullptr);
+  CHECK(std::string(internal::MatchProvider(&headers)->version) == "310.9.0");
   headers.FileHeader.TimeDateStamp = 0x6A986031u;
   headers.OptionalHeader.SizeOfImage = 7565312u;
   CHECK(internal::MatchProvider(&headers) != nullptr);

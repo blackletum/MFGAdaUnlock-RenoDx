@@ -8,6 +8,20 @@ if(NOT EXISTS "${RENODX_SOURCE_DIR}/external/Streamline/include/sl.h")
   message(FATAL_ERROR "Set RENODX_SOURCE_DIR to the existing RenoDX build tree")
 endif()
 enable_testing()
+add_library(mfgunlock_addon_compile OBJECT
+  ../src/addons/mfgunlock/addon.cpp)
+target_compile_definitions(mfgunlock_addon_compile PRIVATE
+  WIN32 _WINDOWS NDEBUG NOMINMAX mfgunlock_EXPORTS)
+target_compile_options(mfgunlock_addon_compile PRIVATE /bigobj)
+target_include_directories(mfgunlock_addon_compile SYSTEM PRIVATE
+  "${RENODX_SOURCE_DIR}/external/Detours/include"
+  "${RENODX_SOURCE_DIR}/external/json/include"
+  "${RENODX_SOURCE_DIR}/external/frozen/include"
+  "${RENODX_SOURCE_DIR}/external/gtl/include"
+  "${RENODX_SOURCE_DIR}/external/Streamline/include"
+  "${RENODX_SOURCE_DIR}/external/Streamline/external/ngx-sdk/include"
+  "${RENODX_SOURCE_DIR}/external/DLSS/include"
+  "${RENODX_SOURCE_DIR}/external/reshade")
 add_executable(latency_analysis_tests latency_analysis_tests.cpp)
 target_compile_definitions(latency_analysis_tests PRIVATE NOMINMAX)
 add_test(NAME latency_analysis_tests COMMAND latency_analysis_tests)
@@ -57,6 +71,11 @@ target_include_directories(input_diagnostics_tests SYSTEM PRIVATE
 add_test(NAME input_diagnostics_tests COMMAND input_diagnostics_tests)
 add_executable(pacing_policy_tests pacing_policy_tests.cpp)
 add_test(NAME pacing_policy_tests COMMAND pacing_policy_tests)
+add_executable(reflex_pacing_tests reflex_pacing_tests.cpp)
+target_compile_definitions(reflex_pacing_tests PRIVATE NOMINMAX)
+target_include_directories(reflex_pacing_tests SYSTEM PRIVATE
+  "${RENODX_SOURCE_DIR}/external/Streamline/include")
+add_test(NAME reflex_pacing_tests COMMAND reflex_pacing_tests)
 add_executable(memory_policy_tests memory_policy_tests.cpp)
 target_include_directories(memory_policy_tests SYSTEM PRIVATE
   "${RENODX_SOURCE_DIR}/external/Streamline/include")
@@ -83,6 +102,16 @@ target_compile_definitions(thin_geometry_tests PRIVATE NOMINMAX)
 add_test(NAME thin_geometry_tests COMMAND thin_geometry_tests)
 add_executable(adaptive_quality_v2_tests adaptive_quality_v2_tests.cpp)
 add_test(NAME adaptive_quality_v2_tests COMMAND adaptive_quality_v2_tests)
+add_executable(cuda_temporal_tests cuda_temporal_tests.cpp)
+target_compile_definitions(cuda_temporal_tests PRIVATE
+  NOMINMAX MFGUNLOCK_CUDA_TEMPORAL_TESTING)
+target_include_directories(cuda_temporal_tests SYSTEM PRIVATE
+  "${RENODX_SOURCE_DIR}/external/Streamline/include"
+  "${RENODX_SOURCE_DIR}/external/reshade"
+  "${RENODX_SOURCE_DIR}/external/Detours/include")
+target_link_libraries(cuda_temporal_tests PRIVATE
+  "${RENODX_SOURCE_DIR}/external/Detours/lib.X64/detours.lib")
+add_test(NAME cuda_temporal_tests COMMAND cuda_temporal_tests)
 find_program(POWERSHELL_EXECUTABLE NAMES powershell)
 if(POWERSHELL_EXECUTABLE)
   add_test(NAME capture_comparison COMMAND "${POWERSHELL_EXECUTABLE}" -NoProfile

@@ -16,6 +16,87 @@ enum class LatencyGuardMode : uint32_t {
   kAutomatic = 2,
 };
 
+enum class ReflexModeOverride : uint32_t {
+  kGame = 0,
+  kOff = 1,
+  kOn = 2,
+  kOnBoost = 3,
+};
+
+enum class ReflexPacingMethod : uint32_t {
+  kNativeSleep = 0,
+  kDxgiWaitable = 1,
+};
+
+inline constexpr ReflexModeOverride NormalizeReflexModeOverride(
+    uint32_t value) {
+  return value <= static_cast<uint32_t>(ReflexModeOverride::kOnBoost)
+             ? static_cast<ReflexModeOverride>(value)
+             : ReflexModeOverride::kGame;
+}
+
+inline constexpr ReflexPacingMethod NormalizeReflexPacingMethod(
+    uint32_t value) {
+  return value <= static_cast<uint32_t>(ReflexPacingMethod::kDxgiWaitable)
+             ? static_cast<ReflexPacingMethod>(value)
+             : ReflexPacingMethod::kNativeSleep;
+}
+
+inline constexpr uint32_t NormalizeHeadroomBasisPoints(uint32_t value) {
+  return value >= 50 && value <= 300 ? value : 100;
+}
+
+// The integer values deliberately match sl::ReflexMode without introducing a
+// Streamline-header dependency into this small, independently tested policy.
+// "Off" is implemented as an FG-safe sleep bypass: Streamline must continue
+// seeing LowLatency because some integrations treat Reflex mode Off as a
+// request to disable DLSS-G as well. The slReflexSleep wrapper removes the
+// Reflex pacing wait instead.
+inline constexpr uint32_t ResolveReflexMode(
+    uint32_t native_mode, ReflexModeOverride override_mode) {
+  switch (override_mode) {
+    case ReflexModeOverride::kOff:
+      return 1;
+    case ReflexModeOverride::kOn:
+      return 1;
+    case ReflexModeOverride::kOnBoost:
+      return 2;
+    default:
+      return native_mode;
+  }
+}
+
+// refresh_millihz keeps 59.94/119.88/239.76 Hz displays precise. Reflex wants
+// a whole-microsecond frame interval, so round upward: the limiter must stay
+// below the requested VRR ceiling rather than accidentally overshooting it.
+inline constexpr uint32_t VrrHeadroomFrameLimitUs(
+    uint32_t refresh_millihz, uint32_t basis_points) {
+  if (refresh_millihz < 10000 || refresh_millihz > 1000000 ||
+      basis_points < 50 || basis_points > 300)
+    return 0;
+  const uint64_t target_millihz =
+      (static_cast<uint64_t>(refresh_millihz) *
+       (10000u - basis_points)) /
+      10000u;
+  if (target_millihz == 0) return 0;
+  return static_cast<uint32_t>(
+      (1000000000ull + target_millihz - 1ull) / target_millihz);
+}
+
+inline constexpr uint32_t StrictestFrameLimitUs(uint32_t a, uint32_t b) {
+  if (a == 0) return b;
+  if (b == 0) return a;
+  return a > b ? a : b;
+}
+
+inline constexpr uint32_t ComposeFrameLimitUs(
+    uint32_t native_limit_us, uint32_t explicit_limit_us,
+    uint32_t latency_guard_limit_us, uint32_t headroom_limit_us) {
+  return StrictestFrameLimitUs(
+      StrictestFrameLimitUs(native_limit_us, explicit_limit_us),
+      StrictestFrameLimitUs(latency_guard_limit_us, headroom_limit_us));
+}
+
 enum class MarkerHealth : uint32_t {
   kUnavailable = 0,
   kWaiting = 1,

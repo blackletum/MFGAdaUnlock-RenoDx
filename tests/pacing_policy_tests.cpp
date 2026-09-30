@@ -22,6 +22,41 @@ int main() {
   CHECK(!IsReady(true, false));
   CHECK(IsReady(true, true));
 
+  using mfgunlock::pacing::ComposeFrameLimitUs;
+  using mfgunlock::pacing::NormalizeHeadroomBasisPoints;
+  using mfgunlock::pacing::NormalizeReflexModeOverride;
+  using mfgunlock::pacing::NormalizeReflexPacingMethod;
+  using mfgunlock::pacing::ReflexModeOverride;
+  using mfgunlock::pacing::ReflexPacingMethod;
+  using mfgunlock::pacing::ResolveReflexMode;
+  using mfgunlock::pacing::StrictestFrameLimitUs;
+  using mfgunlock::pacing::VrrHeadroomFrameLimitUs;
+  CHECK(NormalizeReflexModeOverride(3) == ReflexModeOverride::kOnBoost);
+  CHECK(NormalizeReflexModeOverride(4) == ReflexModeOverride::kGame);
+  CHECK(NormalizeReflexPacingMethod(1) ==
+        ReflexPacingMethod::kDxgiWaitable);
+  CHECK(NormalizeReflexPacingMethod(2) ==
+        ReflexPacingMethod::kNativeSleep);
+  CHECK(NormalizeHeadroomBasisPoints(49) == 100);
+  CHECK(NormalizeHeadroomBasisPoints(50) == 50);
+  CHECK(NormalizeHeadroomBasisPoints(300) == 300);
+  CHECK(NormalizeHeadroomBasisPoints(301) == 100);
+  CHECK(ResolveReflexMode(2, ReflexModeOverride::kGame) == 2);
+  // FG-safe Off keeps the Streamline dependency enabled; the sleep wrapper
+  // bypasses pacing without submitting Reflex mode Off to the plugin.
+  CHECK(ResolveReflexMode(2, ReflexModeOverride::kOff) == 1);
+  CHECK(ResolveReflexMode(0, ReflexModeOverride::kOff) == 1);
+  CHECK(ResolveReflexMode(0, ReflexModeOverride::kOn) == 1);
+  CHECK(ResolveReflexMode(0, ReflexModeOverride::kOnBoost) == 2);
+  CHECK(VrrHeadroomFrameLimitUs(240000, 100) == 4209);
+  CHECK(VrrHeadroomFrameLimitUs(59940, 100) == 16853);
+  CHECK(VrrHeadroomFrameLimitUs(9000, 100) == 0);
+  CHECK(VrrHeadroomFrameLimitUs(240000, 0) == 0);
+  CHECK(StrictestFrameLimitUs(0, 8333) == 8333);
+  CHECK(StrictestFrameLimitUs(10000, 8333) == 10000);
+  CHECK(ComposeFrameLimitUs(0, 8333, 0, 4209) == 8333);
+  CHECK(ComposeFrameLimitUs(10000, 8333, 9000, 4209) == 10000);
+
   using mfgunlock::pacing::TargetFpsToFrameLimitUs;
   CHECK(TargetFpsToFrameLimitUs(0) == 0);
   CHECK(TargetFpsToFrameLimitUs(60) == 16667);

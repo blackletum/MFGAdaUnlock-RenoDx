@@ -83,10 +83,19 @@ int wmain(int argc, wchar_t** argv) {
                            mode == L"--geometry-v2-border";
   mfgunlock::thingeometry::g_refinement_enabled = refined;
   mfgunlock::thingeometry::g_adaptive_quality_enabled = adaptive;
+  if (adaptive) {
+    mfgunlock::thingeometry::g_adaptive_quality_profile =
+        mfgunlock::adaptivequality::Profile::kLuminanceDirectionalV3;
+  }
   mfgunlock::thingeometry::g_border_confidence_enabled =
       mode == L"--border" || mode == L"--geometry-v2-border";
   mfgunlock::blackwell::g_refinement_enabled = refined;
   mfgunlock::blackwell::g_adaptive_quality_enabled = adaptive;
+  if (adaptive) {
+    mfgunlock::blackwell::g_adaptive_quality_profile =
+        mfgunlock::adaptivequality::Profile::kLuminanceDirectionalV3;
+    mfgunlock::blackwell::g_adaptive_quality_v3_oriented_geometry = true;
+  }
   mfgunlock::blackwell::g_geometry_confidence_v2_enabled = geometry_v2;
   HMODULE module = LoadLibraryExW(argv[1], nullptr, DONT_RESOLVE_DLL_REFERENCES);
   if (module == nullptr) {

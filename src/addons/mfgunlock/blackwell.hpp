@@ -3,9 +3,11 @@
  *
  * The implementation follows the fail-closed method validated by MatiasLombo:
  * identify NVIDIA's original sm_89 cubins by their ELF fingerprint and exact
- * fatbin slot size, then replace only the payload in that existing slot. The
- * fatbin header, entry descriptors, registration metadata and surrounding
- * provider image remain untouched.
+ * fatbin slot size, then replace only the payload in that existing slot. A
+ * deliberately oversized, zero-spill geometry V3 research payload uses a
+ * bounded copy of the exact fatbin and redirects its descriptor references;
+ * it is never written beyond the original slot. Registration metadata and the
+ * surrounding provider image remain untouched.
  *
  * Replacement cubins are generated locally from installed NVIDIA DLSS-G
  * providers with MatiasLombo's rebuild_cubins.py workflow. They are deliberately
@@ -20,6 +22,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -50,6 +53,25 @@ inline bool g_geometry_confidence_v2_enabled = false; // research-only, startup-
 inline bool g_adaptive_quality_enabled = false; // unified research suite, startup-scoped
 inline adaptivequality::Profile g_adaptive_quality_profile =
     adaptivequality::Profile::kStableV1;
+inline bool g_adaptive_quality_v3_oriented_geometry = true;
+inline bool g_adaptive_quality_v3_temporal_geometry = true;
+
+enum class AdaptiveGeometryVariant : unsigned int {
+  kNone = 0,
+  kLocal = 1,
+  kTemporal = 2,
+  kMixed = 3,
+};
+
+inline constexpr const char* AdaptiveGeometryVariantName(
+    AdaptiveGeometryVariant variant) {
+  switch (variant) {
+    case AdaptiveGeometryVariant::kLocal: return "Local";
+    case AdaptiveGeometryVariant::kTemporal: return "Temporal";
+    case AdaptiveGeometryVariant::kMixed: return "mixed";
+    default: return "fallback/native";
+  }
+}
 
 enum class KernelRole {
   Unknown,
@@ -68,12 +90,19 @@ inline const char* SilhouetteGuardMechanism(
     SilhouetteGuardMode mode) {
   switch (mode) {
     case SilhouetteGuardMode::Balanced:
-      return g_adaptive_quality_enabled
-                 ? (g_adaptive_quality_profile ==
-                            adaptivequality::Profile::kFlickerReducedV2
-                        ? "adaptive_quality_geometry_v2"
-                        : "adaptive_quality_geometry_v1")
-                 : g_refinement_enabled
+      if (g_adaptive_quality_enabled) {
+        if (g_adaptive_quality_profile ==
+                adaptivequality::Profile::kLuminanceDirectionalV3 &&
+            g_adaptive_quality_v3_oriented_geometry)
+          return g_adaptive_quality_v3_temporal_geometry
+                     ? "adaptive_quality_geometry_v31_temporal"
+                     : "adaptive_quality_geometry_v31_local";
+        if (g_adaptive_quality_profile !=
+            adaptivequality::Profile::kStableV1)
+          return "adaptive_quality_geometry_v2";
+        return "adaptive_quality_geometry_v1";
+      }
+      return g_refinement_enabled
                  ? (g_geometry_confidence_v2_enabled
                         ? "geometry_support_smooth_v2"
                         : "geometry_motion_depth_refined")
@@ -123,8 +152,11 @@ struct Result {
   bool geometry_confidence_v2 = false;
   bool adaptive_quality_requested = false;
   bool adaptive_geometry = false;
+  bool adaptive_geometry_redirected = false;
   adaptivequality::ComponentVersion adaptive_geometry_version =
       adaptivequality::ComponentVersion::kNative;
+  AdaptiveGeometryVariant adaptive_geometry_variant =
+      AdaptiveGeometryVariant::kNone;
   bool adaptive_inpaint_decision = false;
   adaptivequality::ComponentVersion adaptive_inpaint_version =
       adaptivequality::ComponentVersion::kNative;
@@ -249,7 +281,7 @@ inline const generated::CubinPatch* MatchReplacement(const ElfFingerprint& finge
 #if MFGUNLOCK_HAS_GENERATED_THIN_GEOMETRY_CUBINS
 inline const generated_thin_geometry::CubinVariant* MatchScatterVariant(
     const ElfFingerprint& fingerprint, const uint8_t* payload, size_t slot_size,
-    const char* mechanism) {
+    const char* mechanism, bool require_in_place = true) {
   if (mechanism == nullptr) return nullptr;
   for (const auto& replacement : generated_thin_geometry::kThinGeometryCubins) {
     if (std::strcmp(replacement.mechanism, mechanism) != 0) continue;
@@ -258,7 +290,8 @@ inline const generated_thin_geometry::CubinVariant* MatchScatterVariant(
         replacement.source_regs == fingerprint.registers &&
         replacement.slot_size == slot_size &&
         replacement.source_fnv1a64 == Fnv1a64(payload, slot_size) &&
-        replacement.data != nullptr && replacement.size != 0 && replacement.size <= slot_size) {
+        replacement.data != nullptr && replacement.size != 0 &&
+        (!require_in_place || replacement.size <= slot_size)) {
       return &replacement;
     }
   }
@@ -267,6 +300,9 @@ inline const generated_thin_geometry::CubinVariant* MatchScatterVariant(
 #endif
 
 struct Candidate {
+  uint8_t* fatbin = nullptr;
+  size_t fatbin_size = 0;
+  size_t entry_offset = 0;
   uint8_t* payload = nullptr;
   size_t slot_size = 0;
 #if MFGUNLOCK_HAS_GENERATED_BLACKWELL_CUBINS
@@ -344,7 +380,12 @@ inline bool CollectCandidates(HMODULE module, std::vector<Candidate>& candidates
               if (role != KernelRole::Unknown &&
                   std::none_of(candidates.begin(), candidates.end(),
                                [payload](const Candidate& item) { return item.payload == payload; })) {
-                candidates.push_back({payload, static_cast<size_t>(payload_size), replacement, role});
+                candidates.push_back({bytes + offset,
+                                      static_cast<size_t>(fatbin_size) + 16u,
+                                      entry_offset - offset,
+                                      payload,
+                                      static_cast<size_t>(payload_size),
+                                      replacement, role});
               }
             }
           }
@@ -364,6 +405,120 @@ inline bool CollectCandidates(HMODULE module, std::vector<Candidate>& candidates
 #endif
 }
 
+#if MFGUNLOCK_HAS_GENERATED_THIN_GEOMETRY_CUBINS
+inline bool RedirectOversizedCubin(
+    HMODULE module, const Candidate& candidate,
+    const generated_thin_geometry::CubinVariant& replacement,
+    std::vector<Patch>& patches, std::vector<void*>& allocations,
+    std::string& why) {
+  if (candidate.fatbin == nullptr || candidate.fatbin_size < 80u ||
+      candidate.entry_offset < 16u ||
+      candidate.entry_offset + 64u > candidate.fatbin_size) {
+    why = "oversized V3 candidate has invalid fatbin bounds";
+    return false;
+  }
+  uint8_t* entry = candidate.fatbin + candidate.entry_offset;
+  const uint32_t header_size = ReadU32(entry + 4);
+  const uint64_t payload_size64 = ReadU64(entry + 8);
+  if (header_size < 64u || payload_size64 != candidate.slot_size ||
+      candidate.entry_offset + header_size > candidate.fatbin_size ||
+      payload_size64 > candidate.fatbin_size - candidate.entry_offset - header_size ||
+      entry + header_size != candidate.payload) {
+    why = "oversized V3 cubin entry no longer matches the exact candidate";
+    return false;
+  }
+  const size_t padded = (static_cast<size_t>(replacement.size) + 7u) & ~size_t{7u};
+  const size_t suffix_offset = candidate.entry_offset + header_size +
+                               candidate.slot_size;
+  if (padded < replacement.size ||
+      padded > std::numeric_limits<size_t>::max() -
+                   (candidate.fatbin_size - candidate.slot_size)) {
+    why = "oversized V3 fatbin size overflow";
+    return false;
+  }
+  const size_t rebuilt_size = candidate.fatbin_size - candidate.slot_size + padded;
+  if (rebuilt_size > kMaxFatbinSize + 16u) {
+    why = "oversized V3 rebuilt fatbin exceeds the bounded size";
+    return false;
+  }
+
+  std::vector<uint8_t> rebuilt(candidate.fatbin,
+                               candidate.fatbin + candidate.entry_offset + header_size);
+  rebuilt.resize(rebuilt_size, 0);
+  std::memcpy(rebuilt.data() + candidate.entry_offset + header_size,
+              replacement.data, replacement.size);
+  std::memcpy(rebuilt.data() + candidate.entry_offset + header_size + padded,
+              candidate.fatbin + suffix_offset,
+              candidate.fatbin_size - suffix_offset);
+  const uint64_t new_payload_size = padded;
+  const uint64_t new_outer_size = rebuilt_size - 16u;
+  std::memcpy(rebuilt.data() + candidate.entry_offset + 8,
+              &new_payload_size, sizeof(new_payload_size));
+  std::memcpy(rebuilt.data() + 8, &new_outer_size, sizeof(new_outer_size));
+
+  void* allocation = VirtualAlloc(nullptr, rebuilt.size(),
+                                  MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+  if (allocation == nullptr) {
+    why = "oversized V3 replacement fatbin allocation failed";
+    return false;
+  }
+  std::memcpy(allocation, rebuilt.data(), rebuilt.size());
+  allocations.push_back(allocation);
+
+  auto* base = reinterpret_cast<uint8_t*>(module);
+  const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+  const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
+  const size_t image_size = nt->OptionalHeader.SizeOfImage;
+  const uint64_t expected = reinterpret_cast<uint64_t>(candidate.fatbin);
+  const uint64_t redirected = reinterpret_cast<uint64_t>(allocation);
+  const auto* section = IMAGE_FIRST_SECTION(nt);
+  size_t descriptor_count = 0;
+  for (WORD index = 0; index < nt->FileHeader.NumberOfSections; ++index, ++section) {
+    if ((section->Characteristics & IMAGE_SCN_MEM_READ) == 0 ||
+        (section->Characteristics & IMAGE_SCN_MEM_EXECUTE) != 0 ||
+        section->VirtualAddress >= image_size) {
+      continue;
+    }
+    const size_t section_size = std::min<size_t>(
+        section->Misc.VirtualSize, image_size - section->VirtualAddress);
+    uint8_t* bytes = base + section->VirtualAddress;
+    for (size_t offset = 0; offset + sizeof(uint64_t) <= section_size;
+         offset += alignof(uint64_t)) {
+      uint64_t value = 0;
+      std::memcpy(&value, bytes + offset, sizeof(value));
+      if (value != expected) continue;
+      auto* slot = bytes + offset;
+      DWORD old_protection = 0;
+      if (!VirtualProtect(slot, sizeof(uint64_t), PAGE_READWRITE,
+                          &old_protection)) {
+        continue;
+      }
+      Patch patch;
+      patch.payload = slot;
+      patch.original.assign(slot, slot + sizeof(uint64_t));
+      std::memcpy(slot, &redirected, sizeof(redirected));
+      DWORD ignored = 0;
+      VirtualProtect(slot, sizeof(uint64_t), old_protection, &ignored);
+      patches.push_back(std::move(patch));
+      ++descriptor_count;
+    }
+  }
+  if (descriptor_count == 0 || descriptor_count > 32) {
+    std::ostringstream stream;
+    stream << "oversized V3 descriptor reference count is "
+           << descriptor_count << ", expected 1..32";
+    why = stream.str();
+    return false;
+  }
+  std::ostringstream stream;
+  stream << "redirected " << descriptor_count
+         << " exact descriptor reference(s) to a " << rebuilt_size
+         << "-byte ptxas geometry V3 fatbin";
+  why = stream.str();
+  return true;
+}
+#endif
+
 }  // namespace internal
 
 inline constexpr bool HasGeneratedCubins() {
@@ -371,6 +526,7 @@ inline constexpr bool HasGeneratedCubins() {
 }
 
 inline void Restore(std::vector<Patch>& patches, std::vector<void*>& allocations) {
+  bool restored_all = true;
   for (auto patch = patches.rbegin(); patch != patches.rend(); ++patch) {
     if (patch->payload == nullptr || patch->original.empty()) continue;
     DWORD old_protection = 0;
@@ -378,11 +534,19 @@ inline void Restore(std::vector<Patch>& patches, std::vector<void*>& allocations
       std::memcpy(patch->payload, patch->original.data(), patch->original.size());
       DWORD ignored = 0;
       VirtualProtect(patch->payload, patch->original.size(), old_protection, &ignored);
+    } else {
+      restored_all = false;
     }
   }
   patches.clear();
-  // Kept in the API so addon state remains compatible with the earlier
-  // experiment. In-place cubin replacement allocates no executable memory.
+  // Never free a redirected fatbin while a descriptor might still reference
+  // it. A bounded leak on abnormal provider unload is safer than a dangling
+  // CUDA registration pointer.
+  if (restored_all) {
+    for (void* allocation : allocations) {
+      if (allocation != nullptr) VirtualFree(allocation, 0, MEM_RELEASE);
+    }
+  }
   allocations.clear();
 }
 
@@ -425,6 +589,7 @@ inline bool Apply(HMODULE module, std::vector<Patch>& patches, std::vector<void*
     const uint8_t* replacement_data = candidate.replacement->data;
     size_t replacement_size = candidate.replacement->size;
 #if MFGUNLOCK_HAS_GENERATED_THIN_GEOMETRY_CUBINS
+    const generated_thin_geometry::CubinVariant* redirect_variant = nullptr;
     if ((enable_intermediate_scatter || result.silhouette_guard_requested) &&
         candidate.role == KernelRole::MotionVector) {
       const auto fingerprint = internal::ElfFingerprint{
@@ -434,17 +599,49 @@ inline bool Apply(HMODULE module, std::vector<Patch>& patches, std::vector<void*
                                             ? SilhouetteGuardMechanism(
                                                   silhouette_guard_mode)
                                             : "intermediate_scatter";
+      const bool adaptive_geometry_requested = enable_adaptive_quality &&
+          silhouette_guard_mode == SilhouetteGuardMode::Balanced;
+      const bool full_v3_redirect_requested = adaptive_geometry_requested &&
+          requested_mechanism != nullptr &&
+          (std::strcmp(requested_mechanism,
+                       "adaptive_quality_geometry_v31_local") == 0 ||
+           std::strcmp(requested_mechanism,
+                       "adaptive_quality_geometry_v31_temporal") == 0);
       const auto* experimental = internal::MatchScatterVariant(
           fingerprint, candidate.payload, candidate.slot_size,
-          requested_mechanism);
+          requested_mechanism, !full_v3_redirect_requested);
       const bool v2_requested = g_refinement_enabled &&
           g_geometry_confidence_v2_enabled &&
-          silhouette_guard_mode == SilhouetteGuardMode::Balanced;
-      const bool adaptive_geometry_requested = enable_adaptive_quality &&
           silhouette_guard_mode == SilhouetteGuardMode::Balanced;
       const char* selected_mechanism = experimental != nullptr
                                            ? requested_mechanism
                                            : nullptr;
+      if (experimental == nullptr && adaptive_geometry_requested &&
+          requested_mechanism != nullptr &&
+          std::strcmp(requested_mechanism,
+                      "adaptive_quality_geometry_v31_temporal") == 0) {
+        experimental = internal::MatchScatterVariant(
+            fingerprint, candidate.payload, candidate.slot_size,
+            "adaptive_quality_geometry_v31_local", false);
+        if (experimental != nullptr) {
+          selected_mechanism = "adaptive_quality_geometry_v31_local";
+          result.silhouette_guard_fallback = true;
+          result.adaptive_fallback = true;
+        }
+      }
+      if (experimental == nullptr && adaptive_geometry_requested &&
+          g_adaptive_quality_profile ==
+              adaptivequality::Profile::kLuminanceDirectionalV3 &&
+          g_adaptive_quality_v3_oriented_geometry) {
+        experimental = internal::MatchScatterVariant(
+            fingerprint, candidate.payload, candidate.slot_size,
+            "adaptive_quality_geometry_v2");
+        if (experimental != nullptr) {
+          selected_mechanism = "adaptive_quality_geometry_v2";
+          result.silhouette_guard_fallback = true;
+          result.adaptive_fallback = true;
+        }
+      }
       if (experimental == nullptr && adaptive_geometry_requested) {
         experimental = internal::MatchScatterVariant(
             fingerprint, candidate.payload, candidate.slot_size,
@@ -478,13 +675,29 @@ inline bool Apply(HMODULE module, std::vector<Patch>& patches, std::vector<void*
             (std::strcmp(selected_mechanism,
                          "adaptive_quality_geometry_v1") == 0 ||
              std::strcmp(selected_mechanism,
-                         "adaptive_quality_geometry_v2") == 0);
+                         "adaptive_quality_geometry_v2") == 0 ||
+             std::strcmp(selected_mechanism,
+                         "adaptive_quality_geometry_v31_local") == 0 ||
+             std::strcmp(selected_mechanism,
+                         "adaptive_quality_geometry_v31_temporal") == 0);
         if (result.adaptive_geometry) {
-          result.adaptive_geometry_version =
+          const bool v31_local =
               std::strcmp(selected_mechanism,
-                          "adaptive_quality_geometry_v2") == 0
-                  ? adaptivequality::ComponentVersion::kV2
-                  : adaptivequality::ComponentVersion::kV1;
+                          "adaptive_quality_geometry_v31_local") == 0;
+          const bool v31_temporal =
+              std::strcmp(selected_mechanism,
+                          "adaptive_quality_geometry_v31_temporal") == 0;
+          result.adaptive_geometry_version =
+              (v31_local || v31_temporal)
+                  ? adaptivequality::ComponentVersion::kV3
+                  : std::strcmp(selected_mechanism,
+                                "adaptive_quality_geometry_v2") == 0
+                        ? adaptivequality::ComponentVersion::kV2
+                        : adaptivequality::ComponentVersion::kV1;
+          result.adaptive_geometry_variant =
+              v31_temporal ? AdaptiveGeometryVariant::kTemporal
+                           : v31_local ? AdaptiveGeometryVariant::kLocal
+                                       : AdaptiveGeometryVariant::kNone;
         }
         result.adaptive_directional_scatter = result.adaptive_geometry;
         result.geometry_confidence_v2 = selected_mechanism != nullptr &&
@@ -495,6 +708,8 @@ inline bool Apply(HMODULE module, std::vector<Patch>& patches, std::vector<void*
              std::strcmp(selected_mechanism, "geometry_motion_depth_refined") == 0);
         replacement_data = experimental->data;
         replacement_size = experimental->size;
+        if (replacement_size > candidate.slot_size)
+          redirect_variant = experimental;
         result.silhouette_guard = result.silhouette_guard_requested;
         result.silhouette_guard_mode_selected = silhouette_guard_mode;
         result.intermediate_scatter = !result.silhouette_guard_requested;
@@ -536,16 +751,16 @@ inline bool Apply(HMODULE module, std::vector<Patch>& patches, std::vector<void*
           candidate.replacement->text, candidate.replacement->shared,
           candidate.replacement->regs};
       const char* requested_inpaint =
-          g_adaptive_quality_profile ==
-                  adaptivequality::Profile::kFlickerReducedV2
+          g_adaptive_quality_profile !=
+                  adaptivequality::Profile::kStableV1
               ? "adaptive_inpaint_decision_v2"
               : "adaptive_inpaint_decision_v1";
       const auto* adaptive_inpaint = internal::MatchScatterVariant(
           fingerprint, candidate.payload, candidate.slot_size,
           requested_inpaint);
       if (adaptive_inpaint == nullptr &&
-          g_adaptive_quality_profile ==
-              adaptivequality::Profile::kFlickerReducedV2) {
+          g_adaptive_quality_profile !=
+              adaptivequality::Profile::kStableV1) {
         adaptive_inpaint = internal::MatchScatterVariant(
             fingerprint, candidate.payload, candidate.slot_size,
             "adaptive_inpaint_decision_v1");
@@ -566,6 +781,28 @@ inline bool Apply(HMODULE module, std::vector<Patch>& patches, std::vector<void*
         // payload when the exact inpaint profile is unavailable.
         result.adaptive_fallback = true;
       }
+    }
+#endif
+#if MFGUNLOCK_HAS_GENERATED_THIN_GEOMETRY_CUBINS
+    if (replacement_size > candidate.slot_size) {
+      if (redirect_variant == nullptr ||
+          candidate.role != KernelRole::MotionVector) {
+        detail = "oversized cubin is not an authorized geometry V3 redirect";
+        Restore(patches, allocations);
+        return false;
+      }
+      std::string redirect_detail;
+      if (!internal::RedirectOversizedCubin(
+              module, candidate, *redirect_variant, patches, allocations,
+              redirect_detail)) {
+        detail = redirect_detail;
+        Restore(patches, allocations);
+        return false;
+      }
+      result.adaptive_geometry_redirected = true;
+      result.motion_vector = true;
+      ++result.kernels;
+      continue;
     }
 #endif
     Patch patch;
@@ -606,6 +843,9 @@ inline bool Apply(HMODULE module, std::vector<Patch>& patches, std::vector<void*
         stream << " (adaptive asymmetric confidence "
                << adaptivequality::ComponentVersionName(
                       result.adaptive_geometry_version)
+               << ", "
+               << AdaptiveGeometryVariantName(
+                      result.adaptive_geometry_variant)
                << ')';
       else if (result.geometry_confidence_v2) stream << " (geometry confidence V2)";
       else if (result.refined_geometry) stream << " (refined confidence V1)";
@@ -624,6 +864,9 @@ inline bool Apply(HMODULE module, std::vector<Patch>& patches, std::vector<void*
                    ? adaptivequality::ComponentVersionName(
                          result.adaptive_geometry_version)
                    : "native")
+           << " ("
+           << AdaptiveGeometryVariantName(result.adaptive_geometry_variant)
+           << ')'
            << ", directional scatter="
            << (result.adaptive_directional_scatter
                    ? "native motion-adaptive path"
@@ -633,6 +876,15 @@ inline bool Apply(HMODULE module, std::vector<Patch>& patches, std::vector<void*
                     ? adaptivequality::ComponentVersionName(
                           result.adaptive_inpaint_version)
                     : "native");
+    if (g_adaptive_quality_profile ==
+        adaptivequality::Profile::kLuminanceDirectionalV3) {
+      stream << ", V3 oriented-geometry A/B="
+             << (g_adaptive_quality_v3_oriented_geometry
+                     ? "enabled"
+                     : "disabled (intentional V2 request)");
+      if (result.adaptive_geometry_redirected)
+        stream << ", V3 install=redirected oversized ptxas cubin";
+    }
     if (result.adaptive_fallback) stream << " (one or more exact variants unavailable)";
   }
   detail = stream.str();
