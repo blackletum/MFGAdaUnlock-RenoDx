@@ -22,6 +22,27 @@ target_include_directories(mfgunlock_addon_compile SYSTEM PRIVATE
   "${RENODX_SOURCE_DIR}/external/Streamline/external/ngx-sdk/include"
   "${RENODX_SOURCE_DIR}/external/DLSS/include"
   "${RENODX_SOURCE_DIR}/external/reshade")
+add_library(mfgunlock_local_low_overhead SHARED EXCLUDE_FROM_ALL
+  ../src/addons/mfgunlock/addon.cpp)
+target_compile_definitions(mfgunlock_local_low_overhead PRIVATE
+  $<TARGET_PROPERTY:mfgunlock_addon_compile,COMPILE_DEFINITIONS>
+  MFGUNLOCK_LOCAL_LOW_OVERHEAD)
+target_compile_options(mfgunlock_local_low_overhead PRIVATE /bigobj)
+target_include_directories(mfgunlock_local_low_overhead SYSTEM PRIVATE
+  $<TARGET_PROPERTY:mfgunlock_addon_compile,INCLUDE_DIRECTORIES>)
+target_link_libraries(mfgunlock_local_low_overhead PRIVATE
+  "${RENODX_SOURCE_DIR}/external/Detours/lib.X64/detours.lib"
+  user32 gdi32 shell32 ole32 uuid comdlg32 advapi32 version)
+set_target_properties(mfgunlock_local_low_overhead PROPERTIES
+  PREFIX "" SUFFIX ".addon64" OUTPUT_NAME "renodx-mfgunlock-local-low-overhead")
+foreach(policy_variant IN ITEMS local_low_overhead research_baseline)
+  add_executable(${policy_variant}_tests quality_build_policy_tests.cpp)
+  target_compile_definitions(${policy_variant}_tests PRIVATE NOMINMAX)
+  target_include_directories(${policy_variant}_tests SYSTEM PRIVATE
+    "${RENODX_SOURCE_DIR}/external/reshade")
+  add_test(NAME ${policy_variant}_tests COMMAND ${policy_variant}_tests)
+endforeach()
+target_compile_definitions(local_low_overhead_tests PRIVATE MFGUNLOCK_LOCAL_LOW_OVERHEAD)
 add_executable(latency_analysis_tests latency_analysis_tests.cpp)
 target_compile_definitions(latency_analysis_tests PRIVATE NOMINMAX)
 add_test(NAME latency_analysis_tests COMMAND latency_analysis_tests)

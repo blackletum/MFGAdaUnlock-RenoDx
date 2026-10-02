@@ -127,6 +127,7 @@
 #include "./nvapi_status.hpp"
 #include "./ngx_hook.hpp"
 #include "./cuda_temporal.hpp"
+#include "./quality_build_policy.hpp"
 #include "./pacing_policy.hpp"
 #include "./thin_geometry.hpp"
 #include "./validation_status.hpp"
@@ -162,17 +163,17 @@ std::atomic_bool g_configured_adaptive_quality_v3_directional_border{true};
 std::atomic_bool g_adaptive_quality_v3_oriented_geometry{true};
 std::atomic_bool g_configured_adaptive_quality_v3_oriented_geometry{true};
 std::atomic<unsigned int> g_adaptive_quality_v3_stability_mode{
-    static_cast<unsigned int>(
-        mfgunlock::cudatemporal::StabilityMode::kTemporal)};
+    mfgunlock::qualitybuild::StabilityMode(static_cast<unsigned int>(
+        mfgunlock::cudatemporal::StabilityMode::kTemporal))};
 std::atomic<unsigned int> g_configured_adaptive_quality_v3_stability_mode{
-    static_cast<unsigned int>(
-        mfgunlock::cudatemporal::StabilityMode::kTemporal)};
+    mfgunlock::qualitybuild::StabilityMode(static_cast<unsigned int>(
+        mfgunlock::cudatemporal::StabilityMode::kTemporal))};
 std::atomic<unsigned int> g_adaptive_quality_v3_inpaint_mode{
-    static_cast<unsigned int>(
-        mfgunlock::cudatemporal::kDefaultInpaintMode)};
+    mfgunlock::qualitybuild::InpaintMode(static_cast<unsigned int>(
+        mfgunlock::cudatemporal::kDefaultInpaintMode))};
 std::atomic<unsigned int> g_configured_adaptive_quality_v3_inpaint_mode{
-    static_cast<unsigned int>(
-        mfgunlock::cudatemporal::kDefaultInpaintMode)};
+    mfgunlock::qualitybuild::InpaintMode(static_cast<unsigned int>(
+        mfgunlock::cudatemporal::kDefaultInpaintMode))};
 std::atomic<unsigned int> g_source_cap_config_origin{
     static_cast<unsigned int>(
         mfgunlock::pacing::SourceCapConfigOrigin::kNone)};
@@ -999,6 +1000,7 @@ bool PatchBlackwellInModule(HMODULE mod) {
   g_blackwell_applied_detail = detail;
   g_blackwell_modules.push_back(
       {mod, std::move(patches), std::move(allocations), result});
+#if !defined(MFGUNLOCK_LOCAL_LOW_OVERHEAD)
   if (supported_thin_geometry_provider && adaptive_quality &&
       ((result.adaptive_geometry &&
         result.adaptive_geometry_version ==
@@ -1024,6 +1026,7 @@ bool PatchBlackwellInModule(HMODULE mod) {
         "Temporal Stable requested; dedicated Local cubin installed as fallback",
         true);
   }
+#endif
   g_blackwell_patched.store(true, std::memory_order_release);
   char module_path[MAX_PATH] = {};
   GetModuleFileNameA(mod, module_path, MAX_PATH);
@@ -3013,9 +3016,11 @@ void OnPresentStartDiscovery(reshade::api::command_queue* /*queue*/,
   UpdateLatencyGuard(swapchain);
   UpdateVramDiagnostics(swapchain);
   StartDiscoveryWorker();
+#if !defined(MFGUNLOCK_LOCAL_LOW_OVERHEAD)
   if (g_render_api.load(std::memory_order_relaxed) ==
       DetectedRenderApi::kD3D12)
     mfgunlock::cudatemporal::TryInstall();
+#endif
 }
 
 void OnFinishPresent(reshade::api::command_queue* /*queue*/,
@@ -3088,7 +3093,9 @@ void OnInitSwapchain(reshade::api::swapchain* swapchain, bool /*resize*/) {
     }
     ReleaseSRWLockExclusive(&g_reflex_waitable.lock);
     mfgunlock::framecount::NotifySwapchainTransition();
+#if !defined(MFGUNLOCK_LOCAL_LOW_OVERHEAD)
     mfgunlock::cudatemporal::RequestHistoryReset();
+#endif
   }
 }
 
@@ -3114,7 +3121,9 @@ void OnDestroySwapchain(reshade::api::swapchain* swapchain, bool /*resize*/) {
     ClearDxgiDiagnostics();
     mfgunlock::framecount::NotifyDynamicD3D12(false, false, false);
     mfgunlock::framecount::NotifySwapchainTransition();
+#if !defined(MFGUNLOCK_LOCAL_LOW_OVERHEAD)
     mfgunlock::cudatemporal::RequestHistoryReset();
+#endif
   }
 }
 
@@ -3175,9 +3184,11 @@ void OnInitCommandQueue(reshade::api::command_queue* /*queue*/) {
   if (g_force_flip_meter_off.load(std::memory_order_relaxed)) TryPatchFlipMetering();
   mfgunlock::framecount::TryInstall();
   mfgunlock::loadhook::TryInstall();
+#if !defined(MFGUNLOCK_LOCAL_LOW_OVERHEAD)
   if (g_render_api.load(std::memory_order_relaxed) ==
       DetectedRenderApi::kD3D12)
     mfgunlock::cudatemporal::TryInstall();
+#endif
 }
 
 // ---------------------------------------------------------------- overlay
@@ -3973,6 +3984,11 @@ void DrawAdvancedQualityControls(bool adaptive_quality_managed) {
     HelpMarker(
         "Off deliberately requests the validated V2 geometry cubin. No additional texture or shared-memory reads are introduced when enabled.");
 
+#if defined(MFGUNLOCK_LOCAL_LOW_OVERHEAD)
+    ImGui::TextWrapped(
+        "Local low-overhead build: Local Stable geometry + V2 Compatibility inpaint. "
+        "Confidence history and launch hooks are disabled. Saved temporal research settings are preserved but ignored.");
+#else
     constexpr const char* kStabilityModes[] = {
         "Local Stable (3x3 tile)", "Temporal Stable (confidence history)"};
     int stability_mode = static_cast<int>(
@@ -4027,6 +4043,7 @@ void DrawAdvancedQualityControls(bool adaptive_quality_managed) {
             std::memory_order_relaxed)) {
       ImGui::TextDisabled("Inpaint mode saved for next launch; restart the game.");
     }
+#endif
     ImGui::TreePop();
   }
 
@@ -7017,9 +7034,16 @@ void OnRegisterOverlay(reshade::api::effect_runtime* runtime) {
                   ? kUiPositive
                   : kUiMuted);
           const std::string inpaint_temporal_detail =
+#if defined(MFGUNLOCK_LOCAL_LOW_OVERHEAD)
+              "V3 inpaint removed; V2 Compatibility requested (see installed cubin above)";
+#else
               mfgunlock::cudatemporal::InpaintDetail();
+#endif
           StatusRow(
               "Inpaint V3.4 effective", inpaint_temporal_detail.c_str(),
+#if defined(MFGUNLOCK_LOCAL_LOW_OVERHEAD)
+              kUiMuted);
+#else
               mfgunlock::cudatemporal::g_inpaint_temporal_active.load(
                       std::memory_order_acquire)
                   ? kUiPositive
@@ -7027,6 +7051,7 @@ void OnRegisterOverlay(reshade::api::effect_runtime* runtime) {
                              std::memory_order_acquire)
                          ? kUiWarning
                          : kUiMuted));
+#endif
         }
         if (requested_profile ==
             mfgunlock::adaptivequality::Profile::kLuminanceDirectionalV3) {
@@ -7068,9 +7093,19 @@ void OnRegisterOverlay(reshade::api::effect_runtime* runtime) {
                 : "Local Stable",
             kUiMuted);
         const std::string temporal_detail =
+#if defined(MFGUNLOCK_LOCAL_LOW_OVERHEAD)
+            "History disabled; dedicated Local cubin requested (see installed variant above)";
+#else
             mfgunlock::cudatemporal::Detail();
+#endif
         StatusRow(
             "V3.2 stability effective", temporal_detail.c_str(),
+#if defined(MFGUNLOCK_LOCAL_LOW_OVERHEAD)
+            kUiMuted);
+        StatusRow("Build", "Local low-overhead; no V3 inpaint or confidence history", kUiPositive);
+        StatusRow("Temporal backend", "Disabled by build; 0 B history; no self-test or barriers", kUiMuted);
+        StatusRow("CUDA hook fast path", "Not installed; no CUDA/NVAPI launch interception", kUiMuted);
+#else
             mfgunlock::cudatemporal::g_temporal_active.load(
                     std::memory_order_acquire)
                 ? kUiPositive
@@ -7088,6 +7123,7 @@ void OnRegisterOverlay(reshade::api::effect_runtime* runtime) {
                        : "Inactive"),
             mfgunlock::cudatemporal::FastPathReady() ? kUiPositive
                                                      : kUiMuted);
+#endif
         if (mfgunlock::cudatemporal::g_history_bytes.load(
                 std::memory_order_relaxed) != 0) {
           const uint64_t history_bytes =
@@ -7407,6 +7443,10 @@ void OnRegisterOverlay(reshade::api::effect_runtime* runtime) {
                          : "; compatibility/fallback resources")
            << '\n'
            << "Inpaint V3.4 effective: "
+#if defined(MFGUNLOCK_LOCAL_LOW_OVERHEAD)
+           << "V3 inpaint removed; V2 Compatibility requested (see installed cubin above)" << '\n'
+           << "Confidence history: 0 bytes; disabled by local low-overhead build" << '\n'
+#else
            << mfgunlock::cudatemporal::InpaintDetail() << '\n'
            << "Inpaint V3.4 history: "
            << mfgunlock::cudatemporal::g_inpaint_history_bytes.load(
@@ -7421,6 +7461,7 @@ void OnRegisterOverlay(reshade::api::effect_runtime* runtime) {
            << mfgunlock::cudatemporal::g_history_resets.load(
                   std::memory_order_relaxed)
            << '\n'
+#endif
            << "Directional scatter: "
            << (blackwell_active_result.adaptive_directional_scatter
                    ? "Provider-native signed coverage retained"
@@ -7433,6 +7474,12 @@ void OnRegisterOverlay(reshade::api::effect_runtime* runtime) {
                    ? "Temporal Stable"
                    : "Local Stable") << '\n'
            << "V3.2 Stability effective: "
+#if defined(MFGUNLOCK_LOCAL_LOW_OVERHEAD)
+           << "History disabled; dedicated Local cubin requested (see installed variant above)" << '\n'
+           << "Build: Local low-overhead; no V3 inpaint or confidence history" << '\n'
+           << "Temporal backend: Disabled by build; no self-test, allocations or barriers" << '\n'
+           << "CUDA hook fast path: Not installed; no CUDA/NVAPI launch interception" << '\n'
+#else
            << (g_adaptive_quality.load(std::memory_order_relaxed)
                    ? mfgunlock::cudatemporal::Detail()
                    : "Off") << '\n'
@@ -7450,6 +7497,7 @@ void OnRegisterOverlay(reshade::api::effect_runtime* runtime) {
                    ? "active; one immutable dispatch-table atomic load for non-target kernels"
                    : "inactive/target association pending")
            << '\n'
+#endif
            << "Quality refinement requested this session: "
            << (g_adaptive_quality.load(std::memory_order_relaxed)
                    ? "Legacy setting ignored; managed by Adaptive Quality"
@@ -7700,6 +7748,7 @@ void OnRegisterOverlay(reshade::api::effect_runtime* runtime) {
     ImGui::SameLine();
     ImGui::TextDisabled("No local paths or credentials are included.");
 
+
     if (blackwell_patched) {
       std::ostringstream framework_status;
       framework_status << "Blackwell framework kernels are active on "
@@ -7799,7 +7848,8 @@ void LoadConfig() {
     const auto normalized = mfgunlock::cudatemporal::NormalizeMode(
         static_cast<unsigned int>(value));
     g_adaptive_quality_v3_stability_mode.store(
-        static_cast<unsigned int>(normalized), std::memory_order_relaxed);
+        mfgunlock::qualitybuild::StabilityMode(static_cast<unsigned int>(normalized)),
+        std::memory_order_relaxed);
   }
   g_configured_adaptive_quality_v3_stability_mode.store(
       g_adaptive_quality_v3_stability_mode.load(std::memory_order_relaxed),
@@ -7810,11 +7860,13 @@ void LoadConfig() {
         mfgunlock::cudatemporal::NormalizeInpaintMode(
             static_cast<unsigned int>(value));
     g_adaptive_quality_v3_inpaint_mode.store(
-        static_cast<unsigned int>(normalized), std::memory_order_relaxed);
+        mfgunlock::qualitybuild::InpaintMode(static_cast<unsigned int>(normalized)),
+        std::memory_order_relaxed);
   }
   g_configured_adaptive_quality_v3_inpaint_mode.store(
       g_adaptive_quality_v3_inpaint_mode.load(std::memory_order_relaxed),
       std::memory_order_relaxed);
+#if !defined(MFGUNLOCK_LOCAL_LOW_OVERHEAD)
   mfgunlock::cudatemporal::Configure(
       mfgunlock::cudatemporal::NormalizeMode(
           g_adaptive_quality_v3_stability_mode.load(
@@ -7822,6 +7874,7 @@ void LoadConfig() {
       mfgunlock::cudatemporal::NormalizeInpaintMode(
           g_adaptive_quality_v3_inpaint_mode.load(
               std::memory_order_relaxed)));
+#endif
   if (reshade::get_config_value(nullptr, kConfigSection, "ExperimentalQualityRefinement", value))
     g_quality_refinement.store(value != 0, std::memory_order_relaxed);
   g_configured_quality_refinement.store(g_quality_refinement.load(std::memory_order_relaxed),
@@ -8138,13 +8191,21 @@ void LoadConfig() {
                             : "V2 Compatibility; explicit compatibility mode or invalid-value fallback.");
   reshade::log::message(reshade::log::level::info,
                         inpaint_log.str().c_str());
+#if defined(MFGUNLOCK_LOCAL_LOW_OVERHEAD)
+  reshade::log::message(reshade::log::level::info,
+      "mfgunlock: Local low-overhead build; V3 inpaint removed; confidence history, CUDA/NVAPI launch hooks and backend barriers disabled. Saved temporal keys preserved but ignored; Reflex, caps and pacing configuration unchanged.");
+#endif
 }
 
 }  // namespace
 
 extern "C" __declspec(dllexport) constexpr const char* NAME = "MFG Unlock";
 extern "C" __declspec(dllexport) constexpr const char* DESCRIPTION =
+#if defined(MFGUNLOCK_LOCAL_LOW_OVERHEAD)
+    "Local low-overhead; V2 inpaint; no confidence history or CUDA/NVAPI launch interception";
+#else
     "Reports DLSSG.MultiFrameCountMax so Streamline offers multi-frame generation";
+#endif
 
 BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
   switch (fdw_reason) {
@@ -8240,7 +8301,9 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
             mfgunlock::reflexpacing::FallbackReason::kNotRequested);
       }
       ReleaseSRWLockExclusive(&g_reflex_waitable.lock);
+#if !defined(MFGUNLOCK_LOCAL_LOW_OVERHEAD)
       mfgunlock::cudatemporal::Uninstall();
+#endif
       mfgunlock::loadhook::Uninstall();
       mfgunlock::framecount::Uninstall();
       RestoreThinGeometry();

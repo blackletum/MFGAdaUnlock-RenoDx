@@ -28,6 +28,7 @@
 #include <vector>
 
 #include "adaptive_quality.hpp"
+#include "quality_build_policy.hpp"
 
 #if __has_include("./blackwell_cubins.generated.hpp")
 namespace mfgunlock::blackwell::generated {
@@ -54,10 +55,12 @@ inline bool g_adaptive_quality_enabled = false; // unified research suite, start
 inline adaptivequality::Profile g_adaptive_quality_profile =
     adaptivequality::Profile::kStableV1;
 inline bool g_adaptive_quality_v3_oriented_geometry = true;
-inline bool g_adaptive_quality_v3_temporal_geometry = true;
+inline bool g_adaptive_quality_v3_temporal_geometry =
+    qualitybuild::kConfidenceHistoryEnabled;
 // Mirrors cudatemporal::kDefaultInpaintMode without coupling the cubin patcher
 // to the CUDA interception header.
-inline unsigned int g_adaptive_quality_v3_inpaint_mode = 2;
+inline unsigned int g_adaptive_quality_v3_inpaint_mode =
+    qualitybuild::InpaintMode(2);
 
 enum class AdaptiveGeometryVariant : unsigned int {
   kNone = 0,
@@ -95,6 +98,18 @@ inline constexpr const char* AdaptiveInpaintVariantName(
   }
 }
 
+inline const char* AdaptiveInpaintMechanism() {
+  const auto mode = qualitybuild::InpaintMode(g_adaptive_quality_v3_inpaint_mode);
+  if (g_adaptive_quality_profile != adaptivequality::Profile::kLuminanceDirectionalV3 ||
+      mode == 0) {
+    return g_adaptive_quality_profile == adaptivequality::Profile::kStableV1
+               ? "adaptive_inpaint_decision_v1"
+               : "adaptive_inpaint_decision_v2";
+  }
+  return mode == 2 ? "adaptive_inpaint_decision_v3_temporal"
+                   : "adaptive_inpaint_decision_v3_local";
+}
+
 enum class KernelRole {
   Unknown,
   MotionVector,
@@ -116,7 +131,8 @@ inline const char* SilhouetteGuardMechanism(
         if (g_adaptive_quality_profile ==
                 adaptivequality::Profile::kLuminanceDirectionalV3 &&
             g_adaptive_quality_v3_oriented_geometry)
-          return g_adaptive_quality_v3_temporal_geometry
+          return qualitybuild::kConfidenceHistoryEnabled &&
+                         g_adaptive_quality_v3_temporal_geometry
                      ? "adaptive_quality_geometry_v31_temporal"
                      : "adaptive_quality_geometry_v31_local";
         if (g_adaptive_quality_profile !=
@@ -778,22 +794,16 @@ inline bool Apply(HMODULE module, std::vector<Patch>& patches, std::vector<void*
       const bool v3_profile =
           g_adaptive_quality_profile ==
           adaptivequality::Profile::kLuminanceDirectionalV3;
-      const char* requested_inpaint =
-          !v3_profile || g_adaptive_quality_v3_inpaint_mode == 0
-              ? (g_adaptive_quality_profile !=
-                         adaptivequality::Profile::kStableV1
-                     ? "adaptive_inpaint_decision_v2"
-                     : "adaptive_inpaint_decision_v1")
-              : g_adaptive_quality_v3_inpaint_mode == 2
-                    ? "adaptive_inpaint_decision_v3_temporal"
-                    : "adaptive_inpaint_decision_v3_local";
+      const auto inpaint_mode =
+          qualitybuild::InpaintMode(g_adaptive_quality_v3_inpaint_mode);
+      const char* requested_inpaint = AdaptiveInpaintMechanism();
       const auto* adaptive_inpaint = internal::MatchScatterVariant(
           fingerprint, candidate.payload, candidate.slot_size,
-          requested_inpaint, !v3_profile || g_adaptive_quality_v3_inpaint_mode == 0);
+          requested_inpaint, !v3_profile || inpaint_mode == 0);
       const char* selected_inpaint =
           adaptive_inpaint != nullptr ? requested_inpaint : nullptr;
       if (adaptive_inpaint == nullptr && v3_profile &&
-          g_adaptive_quality_v3_inpaint_mode == 2) {
+          inpaint_mode == 2) {
         adaptive_inpaint = internal::MatchScatterVariant(
             fingerprint, candidate.payload, candidate.slot_size,
             "adaptive_inpaint_decision_v3_local", false);
@@ -803,7 +813,7 @@ inline bool Apply(HMODULE module, std::vector<Patch>& patches, std::vector<void*
         }
       }
       if (adaptive_inpaint == nullptr && v3_profile &&
-          g_adaptive_quality_v3_inpaint_mode != 0) {
+          inpaint_mode != 0) {
         adaptive_inpaint = internal::MatchScatterVariant(
             fingerprint, candidate.payload, candidate.slot_size,
             "adaptive_inpaint_decision_v2");
