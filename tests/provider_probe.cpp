@@ -67,17 +67,18 @@ bool Contains(HMODULE module, const char* needle) {
 
 int wmain(int argc, wchar_t** argv) {
   if (argc != 2 && argc != 3) {
-    std::wcerr << L"usage: provider_probe <nvngx_dlssg.dll> [--refined|--border|--geometry-v2|--geometry-v2-border|--adaptive]\n";
+    std::wcerr << L"usage: provider_probe <nvngx_dlssg.dll> [--refined|--border|--geometry-v2|--geometry-v2-border|--adaptive|--adaptive-inpaint-temporal]\n";
     return 2;
   }
   const std::wstring mode = argc == 3 ? argv[2] : L"";
   if (!mode.empty() && mode != L"--refined" && mode != L"--border" &&
       mode != L"--geometry-v2" && mode != L"--geometry-v2-border" &&
-      mode != L"--adaptive") {
+      mode != L"--adaptive" && mode != L"--adaptive-inpaint-temporal") {
     std::wcerr << L"unknown probe mode: " << mode << L'\n';
     return 2;
   }
-  const bool adaptive = mode == L"--adaptive";
+  const bool adaptive = mode == L"--adaptive" ||
+                        mode == L"--adaptive-inpaint-temporal";
   const bool refined = !mode.empty() && !adaptive;
   const bool geometry_v2 = mode == L"--geometry-v2" ||
                            mode == L"--geometry-v2-border";
@@ -95,6 +96,8 @@ int wmain(int argc, wchar_t** argv) {
     mfgunlock::blackwell::g_adaptive_quality_profile =
         mfgunlock::adaptivequality::Profile::kLuminanceDirectionalV3;
     mfgunlock::blackwell::g_adaptive_quality_v3_oriented_geometry = true;
+    mfgunlock::blackwell::g_adaptive_quality_v3_inpaint_mode =
+        mode == L"--adaptive-inpaint-temporal" ? 2u : 0u;
   }
   mfgunlock::blackwell::g_geometry_confidence_v2_enabled = geometry_v2;
   HMODULE module = LoadLibraryExW(argv[1], nullptr, DONT_RESOLVE_DLL_REFERENCES);
@@ -140,6 +143,10 @@ int wmain(int argc, wchar_t** argv) {
             << '\n';
   std::cout << "adaptive_inpaint_decision="
             << (blackwell_result.adaptive_inpaint_decision ? "applied" : "not-applied")
+            << '\n';
+  std::cout << "adaptive_inpaint_variant="
+            << mfgunlock::blackwell::AdaptiveInpaintVariantName(
+                   blackwell_result.adaptive_inpaint_variant)
             << '\n';
   std::cout << "blackwell_detail=" << blackwell_detail << '\n';
 

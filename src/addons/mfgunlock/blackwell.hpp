@@ -55,6 +55,9 @@ inline adaptivequality::Profile g_adaptive_quality_profile =
     adaptivequality::Profile::kStableV1;
 inline bool g_adaptive_quality_v3_oriented_geometry = true;
 inline bool g_adaptive_quality_v3_temporal_geometry = true;
+// Mirrors cudatemporal::kDefaultInpaintMode without coupling the cubin patcher
+// to the CUDA interception header.
+inline unsigned int g_adaptive_quality_v3_inpaint_mode = 2;
 
 enum class AdaptiveGeometryVariant : unsigned int {
   kNone = 0,
@@ -69,6 +72,25 @@ inline constexpr const char* AdaptiveGeometryVariantName(
     case AdaptiveGeometryVariant::kLocal: return "Local";
     case AdaptiveGeometryVariant::kTemporal: return "Temporal";
     case AdaptiveGeometryVariant::kMixed: return "mixed";
+    default: return "fallback/native";
+  }
+}
+
+enum class AdaptiveInpaintVariant : unsigned int {
+  kNone = 0,
+  kV2Compatibility = 1,
+  kLocal = 2,
+  kTemporal = 3,
+  kMixed = 4,
+};
+
+inline constexpr const char* AdaptiveInpaintVariantName(
+    AdaptiveInpaintVariant variant) {
+  switch (variant) {
+    case AdaptiveInpaintVariant::kV2Compatibility: return "V2 Compatibility";
+    case AdaptiveInpaintVariant::kLocal: return "Local V3";
+    case AdaptiveInpaintVariant::kTemporal: return "Temporal V3";
+    case AdaptiveInpaintVariant::kMixed: return "mixed";
     default: return "fallback/native";
   }
 }
@@ -160,6 +182,9 @@ struct Result {
   bool adaptive_inpaint_decision = false;
   adaptivequality::ComponentVersion adaptive_inpaint_version =
       adaptivequality::ComponentVersion::kNative;
+  AdaptiveInpaintVariant adaptive_inpaint_variant =
+      AdaptiveInpaintVariant::kNone;
+  bool adaptive_inpaint_redirected = false;
   bool adaptive_directional_scatter = false;
   bool adaptive_fallback = false;
   SilhouetteGuardMode silhouette_guard_mode_requested =
@@ -750,31 +775,76 @@ inline bool Apply(HMODULE module, std::vector<Patch>& patches, std::vector<void*
       const auto fingerprint = internal::ElfFingerprint{
           candidate.replacement->text, candidate.replacement->shared,
           candidate.replacement->regs};
+      const bool v3_profile =
+          g_adaptive_quality_profile ==
+          adaptivequality::Profile::kLuminanceDirectionalV3;
       const char* requested_inpaint =
-          g_adaptive_quality_profile !=
-                  adaptivequality::Profile::kStableV1
-              ? "adaptive_inpaint_decision_v2"
-              : "adaptive_inpaint_decision_v1";
+          !v3_profile || g_adaptive_quality_v3_inpaint_mode == 0
+              ? (g_adaptive_quality_profile !=
+                         adaptivequality::Profile::kStableV1
+                     ? "adaptive_inpaint_decision_v2"
+                     : "adaptive_inpaint_decision_v1")
+              : g_adaptive_quality_v3_inpaint_mode == 2
+                    ? "adaptive_inpaint_decision_v3_temporal"
+                    : "adaptive_inpaint_decision_v3_local";
       const auto* adaptive_inpaint = internal::MatchScatterVariant(
           fingerprint, candidate.payload, candidate.slot_size,
-          requested_inpaint);
+          requested_inpaint, !v3_profile || g_adaptive_quality_v3_inpaint_mode == 0);
+      const char* selected_inpaint =
+          adaptive_inpaint != nullptr ? requested_inpaint : nullptr;
+      if (adaptive_inpaint == nullptr && v3_profile &&
+          g_adaptive_quality_v3_inpaint_mode == 2) {
+        adaptive_inpaint = internal::MatchScatterVariant(
+            fingerprint, candidate.payload, candidate.slot_size,
+            "adaptive_inpaint_decision_v3_local", false);
+        if (adaptive_inpaint != nullptr) {
+          selected_inpaint = "adaptive_inpaint_decision_v3_local";
+          result.adaptive_fallback = true;
+        }
+      }
+      if (adaptive_inpaint == nullptr && v3_profile &&
+          g_adaptive_quality_v3_inpaint_mode != 0) {
+        adaptive_inpaint = internal::MatchScatterVariant(
+            fingerprint, candidate.payload, candidate.slot_size,
+            "adaptive_inpaint_decision_v2");
+        if (adaptive_inpaint != nullptr) {
+          selected_inpaint = "adaptive_inpaint_decision_v2";
+          result.adaptive_fallback = true;
+        }
+      }
       if (adaptive_inpaint == nullptr &&
-          g_adaptive_quality_profile !=
-              adaptivequality::Profile::kStableV1) {
+          g_adaptive_quality_profile != adaptivequality::Profile::kStableV1) {
         adaptive_inpaint = internal::MatchScatterVariant(
             fingerprint, candidate.payload, candidate.slot_size,
             "adaptive_inpaint_decision_v1");
-        if (adaptive_inpaint != nullptr) result.adaptive_fallback = true;
+        if (adaptive_inpaint != nullptr) {
+          selected_inpaint = "adaptive_inpaint_decision_v1";
+          result.adaptive_fallback = true;
+        }
       }
       if (adaptive_inpaint != nullptr) {
         replacement_data = adaptive_inpaint->data;
         replacement_size = adaptive_inpaint->size;
+        if (replacement_size > candidate.slot_size)
+          redirect_variant = adaptive_inpaint;
         result.adaptive_inpaint_decision = true;
-        result.adaptive_inpaint_version =
-            std::strcmp(adaptive_inpaint->mechanism,
-                        "adaptive_inpaint_decision_v2") == 0
-                ? adaptivequality::ComponentVersion::kV2
-                : adaptivequality::ComponentVersion::kV1;
+        const bool temporal = std::strcmp(
+            selected_inpaint, "adaptive_inpaint_decision_v3_temporal") == 0;
+        const bool local = std::strcmp(
+            selected_inpaint, "adaptive_inpaint_decision_v3_local") == 0;
+        result.adaptive_inpaint_version = temporal || local
+            ? adaptivequality::ComponentVersion::kV3
+            : std::strcmp(selected_inpaint,
+                          "adaptive_inpaint_decision_v2") == 0
+                  ? adaptivequality::ComponentVersion::kV2
+                  : adaptivequality::ComponentVersion::kV1;
+        result.adaptive_inpaint_variant = temporal
+            ? AdaptiveInpaintVariant::kTemporal
+            : local ? AdaptiveInpaintVariant::kLocal
+                    : result.adaptive_inpaint_version ==
+                              adaptivequality::ComponentVersion::kV2
+                          ? AdaptiveInpaintVariant::kV2Compatibility
+                          : AdaptiveInpaintVariant::kNone;
       } else {
         // Keep the already validated Blackwell decision kernel. Adaptive
         // quality is intentionally partial rather than substituting a guessed
@@ -786,8 +856,9 @@ inline bool Apply(HMODULE module, std::vector<Patch>& patches, std::vector<void*
 #if MFGUNLOCK_HAS_GENERATED_THIN_GEOMETRY_CUBINS
     if (replacement_size > candidate.slot_size) {
       if (redirect_variant == nullptr ||
-          candidate.role != KernelRole::MotionVector) {
-        detail = "oversized cubin is not an authorized geometry V3 redirect";
+          (candidate.role != KernelRole::MotionVector &&
+           candidate.role != KernelRole::InpaintDecision)) {
+        detail = "oversized cubin is not an authorized Adaptive Quality V3 redirect";
         Restore(patches, allocations);
         return false;
       }
@@ -799,8 +870,13 @@ inline bool Apply(HMODULE module, std::vector<Patch>& patches, std::vector<void*
         Restore(patches, allocations);
         return false;
       }
-      result.adaptive_geometry_redirected = true;
-      result.motion_vector = true;
+      if (candidate.role == KernelRole::MotionVector) {
+        result.adaptive_geometry_redirected = true;
+        result.motion_vector = true;
+      } else {
+        result.adaptive_inpaint_redirected = true;
+        result.inpaint_decision = true;
+      }
       ++result.kernels;
       continue;
     }
@@ -875,7 +951,10 @@ inline bool Apply(HMODULE module, std::vector<Patch>& patches, std::vector<void*
            << (result.adaptive_inpaint_decision
                     ? adaptivequality::ComponentVersionName(
                           result.adaptive_inpaint_version)
-                    : "native");
+                    : "native")
+           << " ("
+           << AdaptiveInpaintVariantName(result.adaptive_inpaint_variant)
+           << ')';
     if (g_adaptive_quality_profile ==
         adaptivequality::Profile::kLuminanceDirectionalV3) {
       stream << ", V3 oriented-geometry A/B="
@@ -884,6 +963,8 @@ inline bool Apply(HMODULE module, std::vector<Patch>& patches, std::vector<void*
                      : "disabled (intentional V2 request)");
       if (result.adaptive_geometry_redirected)
         stream << ", V3 install=redirected oversized ptxas cubin";
+      if (result.adaptive_inpaint_redirected)
+        stream << ", inpaint V3 install=redirected oversized ptxas cubin";
     }
     if (result.adaptive_fallback) stream << " (one or more exact variants unavailable)";
   }

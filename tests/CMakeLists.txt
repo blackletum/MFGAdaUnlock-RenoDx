@@ -102,6 +102,8 @@ target_compile_definitions(thin_geometry_tests PRIVATE NOMINMAX)
 add_test(NAME thin_geometry_tests COMMAND thin_geometry_tests)
 add_executable(adaptive_quality_v2_tests adaptive_quality_v2_tests.cpp)
 add_test(NAME adaptive_quality_v2_tests COMMAND adaptive_quality_v2_tests)
+add_executable(adaptive_inpaint_v3_tests adaptive_inpaint_v3_tests.cpp)
+add_test(NAME adaptive_inpaint_v3_tests COMMAND adaptive_inpaint_v3_tests)
 add_executable(cuda_temporal_tests cuda_temporal_tests.cpp)
 target_compile_definitions(cuda_temporal_tests PRIVATE
   NOMINMAX MFGUNLOCK_CUDA_TEMPORAL_TESTING)

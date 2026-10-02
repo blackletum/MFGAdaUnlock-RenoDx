@@ -167,6 +167,12 @@ std::atomic<unsigned int> g_adaptive_quality_v3_stability_mode{
 std::atomic<unsigned int> g_configured_adaptive_quality_v3_stability_mode{
     static_cast<unsigned int>(
         mfgunlock::cudatemporal::StabilityMode::kTemporal)};
+std::atomic<unsigned int> g_adaptive_quality_v3_inpaint_mode{
+    static_cast<unsigned int>(
+        mfgunlock::cudatemporal::kDefaultInpaintMode)};
+std::atomic<unsigned int> g_configured_adaptive_quality_v3_inpaint_mode{
+    static_cast<unsigned int>(
+        mfgunlock::cudatemporal::kDefaultInpaintMode)};
 std::atomic<unsigned int> g_source_cap_config_origin{
     static_cast<unsigned int>(
         mfgunlock::pacing::SourceCapConfigOrigin::kNone)};
@@ -910,6 +916,19 @@ mfgunlock::blackwell::Result AggregateBlackwellResults(
         mfgunlock::adaptivequality::MergeComponentVersions(
             result.adaptive_inpaint_version,
             module.result.adaptive_inpaint_version);
+    result.adaptive_inpaint_redirected |=
+        module.result.adaptive_inpaint_redirected;
+    if (result.adaptive_inpaint_variant ==
+        mfgunlock::blackwell::AdaptiveInpaintVariant::kNone) {
+      result.adaptive_inpaint_variant =
+          module.result.adaptive_inpaint_variant;
+    } else if (module.result.adaptive_inpaint_variant !=
+                   mfgunlock::blackwell::AdaptiveInpaintVariant::kNone &&
+               result.adaptive_inpaint_variant !=
+                   module.result.adaptive_inpaint_variant) {
+      result.adaptive_inpaint_variant =
+          mfgunlock::blackwell::AdaptiveInpaintVariant::kMixed;
+    }
     result.adaptive_directional_scatter |= module.result.adaptive_directional_scatter;
     result.adaptive_fallback |= module.result.adaptive_fallback;
     result.kernels += module.result.kernels;
@@ -970,7 +989,8 @@ bool PatchBlackwellInModule(HMODULE mod) {
   if (!mfgunlock::blackwell::Apply(mod, patches, allocations, result, detail,
                                    enable_intermediate_scatter,
                                    silhouette_guard_mode,
-                                   adaptive_quality)) {
+                                   adaptive_quality &&
+                                       supported_thin_geometry_provider)) {
     g_blackwell_detail = detail;
     return false;
   }
@@ -980,12 +1000,14 @@ bool PatchBlackwellInModule(HMODULE mod) {
   g_blackwell_modules.push_back(
       {mod, std::move(patches), std::move(allocations), result});
   if (supported_thin_geometry_provider && adaptive_quality &&
-      result.adaptive_geometry &&
-      result.adaptive_geometry_redirected &&
-      result.adaptive_geometry_version ==
-          mfgunlock::adaptivequality::ComponentVersion::kV3 &&
-      result.adaptive_geometry_variant ==
-          mfgunlock::blackwell::AdaptiveGeometryVariant::kTemporal) {
+      ((result.adaptive_geometry &&
+        result.adaptive_geometry_version ==
+            mfgunlock::adaptivequality::ComponentVersion::kV3 &&
+        result.adaptive_geometry_variant ==
+            mfgunlock::blackwell::AdaptiveGeometryVariant::kTemporal) ||
+       (result.adaptive_inpaint_decision &&
+        result.adaptive_inpaint_variant ==
+            mfgunlock::blackwell::AdaptiveInpaintVariant::kTemporal))) {
     // Hook installation is intentionally deferred to a ReShade callback,
     // outside the loader/provider-maintenance critical section.
     mfgunlock::cudatemporal::AuthorizeExactProvider(true);
@@ -3066,6 +3088,7 @@ void OnInitSwapchain(reshade::api::swapchain* swapchain, bool /*resize*/) {
     }
     ReleaseSRWLockExclusive(&g_reflex_waitable.lock);
     mfgunlock::framecount::NotifySwapchainTransition();
+    mfgunlock::cudatemporal::RequestHistoryReset();
   }
 }
 
@@ -3091,6 +3114,7 @@ void OnDestroySwapchain(reshade::api::swapchain* swapchain, bool /*resize*/) {
     ClearDxgiDiagnostics();
     mfgunlock::framecount::NotifyDynamicD3D12(false, false, false);
     mfgunlock::framecount::NotifySwapchainTransition();
+    mfgunlock::cudatemporal::RequestHistoryReset();
   }
 }
 
@@ -3974,6 +3998,34 @@ void DrawAdvancedQualityControls(bool adaptive_quality_managed) {
         g_adaptive_quality_v3_stability_mode.load(
             std::memory_order_relaxed)) {
       ImGui::TextDisabled("Saved for next launch; restart the game.");
+    }
+
+    constexpr const char* kInpaintModes[] = {
+        "V2 Compatibility", "Local V3", "Temporal V3"};
+    int inpaint_mode = static_cast<int>(
+        mfgunlock::cudatemporal::NormalizeInpaintMode(
+            g_configured_adaptive_quality_v3_inpaint_mode.load(
+                std::memory_order_relaxed)));
+    SetNextItemWidthWithHelp("V3.4 inpaint stability");
+    if (ImGui::Combo("V3.4 inpaint stability", &inpaint_mode,
+                     kInpaintModes,
+                     static_cast<int>(std::size(kInpaintModes)))) {
+      const auto selected =
+          mfgunlock::cudatemporal::NormalizeInpaintMode(
+              static_cast<unsigned int>(inpaint_mode));
+      g_configured_adaptive_quality_v3_inpaint_mode.store(
+          static_cast<unsigned int>(selected), std::memory_order_relaxed);
+      reshade::set_config_value(
+          nullptr, kConfigSection, "AdaptiveQualityV3InpaintMode",
+          static_cast<int>(selected));
+    }
+    HelpMarker(
+        "Temporal V3 is the default when no saved setting exists. Local V3 separates hard rejects without history. Temporal V3 stores one confidence byte per pixel, direction and symmetric phase bucket; color always comes from the current frame. Invalid saved values fall back to V2 Compatibility. Requires restart.");
+    if (g_configured_adaptive_quality_v3_inpaint_mode.load(
+            std::memory_order_relaxed) !=
+        g_adaptive_quality_v3_inpaint_mode.load(
+            std::memory_order_relaxed)) {
+      ImGui::TextDisabled("Inpaint mode saved for next launch; restart the game.");
     }
     ImGui::TreePop();
   }
@@ -6877,10 +6929,19 @@ void OnRegisterOverlay(reshade::api::effect_runtime* runtime) {
                 : mfgunlock::adaptivequality::ExpectedComponentVersion(
                       requested_profile,
                       mfgunlock::adaptivequality::Component::kGeometry);
+        const auto requested_inpaint_mode =
+            mfgunlock::cudatemporal::NormalizeInpaintMode(
+                g_adaptive_quality_v3_inpaint_mode.load(
+                    std::memory_order_relaxed));
         const auto expected_inpaint =
-            mfgunlock::adaptivequality::ExpectedComponentVersion(
-                requested_profile,
-                mfgunlock::adaptivequality::Component::kInpaint);
+            requested_profile ==
+                    mfgunlock::adaptivequality::Profile::kLuminanceDirectionalV3 &&
+                requested_inpaint_mode !=
+                    mfgunlock::cudatemporal::InpaintMode::kV2Compatibility
+                ? mfgunlock::adaptivequality::ComponentVersion::kV3
+                : mfgunlock::adaptivequality::ExpectedComponentVersion(
+                      requested_profile,
+                      mfgunlock::adaptivequality::Component::kInpaint);
         const bool all_requested_versions =
             warp_version == expected_warp &&
             geometry_version == expected_geometry &&
@@ -6936,6 +6997,37 @@ void OnRegisterOverlay(reshade::api::effect_runtime* runtime) {
                   AdaptiveComponentColor(
                       expected_inpaint, inpaint_version,
                       blackwell_active_result.adaptive_inpaint_decision));
+        if (requested_profile ==
+            mfgunlock::adaptivequality::Profile::kLuminanceDirectionalV3) {
+          const char* requested_inpaint =
+              requested_inpaint_mode ==
+                      mfgunlock::cudatemporal::InpaintMode::kTemporal
+                  ? "Temporal V3"
+                  : requested_inpaint_mode ==
+                            mfgunlock::cudatemporal::InpaintMode::kLocal
+                        ? "Local V3"
+                        : "V2 Compatibility";
+          StatusRow("Inpaint V3.4 requested", requested_inpaint, kUiMuted);
+          StatusRow(
+              "Inpaint V3.4 cubin",
+              mfgunlock::blackwell::AdaptiveInpaintVariantName(
+                  blackwell_active_result.adaptive_inpaint_variant),
+              blackwell_active_result.adaptive_inpaint_variant ==
+                      mfgunlock::blackwell::AdaptiveInpaintVariant::kTemporal
+                  ? kUiPositive
+                  : kUiMuted);
+          const std::string inpaint_temporal_detail =
+              mfgunlock::cudatemporal::InpaintDetail();
+          StatusRow(
+              "Inpaint V3.4 effective", inpaint_temporal_detail.c_str(),
+              mfgunlock::cudatemporal::g_inpaint_temporal_active.load(
+                      std::memory_order_acquire)
+                  ? kUiPositive
+                  : (mfgunlock::cudatemporal::g_inpaint_fallback.load(
+                             std::memory_order_acquire)
+                         ? kUiWarning
+                         : kUiMuted));
+        }
         if (requested_profile ==
             mfgunlock::adaptivequality::Profile::kLuminanceDirectionalV3) {
           StatusRow(
@@ -7014,6 +7106,25 @@ void OnRegisterOverlay(reshade::api::effect_runtime* runtime) {
                          << 'x';
           StatusRow("V3.2 confidence history",
                     history_status.str().c_str(), kUiMuted);
+        }
+        if (mfgunlock::cudatemporal::g_inpaint_history_bytes.load(
+                std::memory_order_relaxed) != 0) {
+          std::ostringstream inpaint_history;
+          inpaint_history
+              << mfgunlock::cudatemporal::g_inpaint_history_bytes.load(
+                     std::memory_order_relaxed) /
+                     (1024.0 * 1024.0)
+              << " MiB; total arena used "
+              << (mfgunlock::cudatemporal::g_history_bytes.load(
+                      std::memory_order_relaxed) +
+                  mfgunlock::cudatemporal::g_inpaint_history_bytes.load(
+                      std::memory_order_relaxed)) /
+                     (1024.0 * 1024.0)
+              << " / 96 MiB; resets "
+              << mfgunlock::cudatemporal::g_history_resets.load(
+                     std::memory_order_relaxed);
+          StatusRow("V3.4 inpaint history",
+                    inpaint_history.str().c_str(), kUiMuted);
         }
       }
       if (!g_adaptive_quality.load(std::memory_order_relaxed)) {
@@ -7138,9 +7249,19 @@ void OnRegisterOverlay(reshade::api::effect_runtime* runtime) {
             : mfgunlock::adaptivequality::ExpectedComponentVersion(
                   adaptive_profile,
                   mfgunlock::adaptivequality::Component::kGeometry);
+    const auto requested_inpaint_mode =
+        mfgunlock::cudatemporal::NormalizeInpaintMode(
+            g_adaptive_quality_v3_inpaint_mode.load(
+                std::memory_order_relaxed));
     const auto expected_inpaint =
-        mfgunlock::adaptivequality::ExpectedComponentVersion(
-            adaptive_profile, mfgunlock::adaptivequality::Component::kInpaint);
+        adaptive_profile ==
+                mfgunlock::adaptivequality::Profile::kLuminanceDirectionalV3 &&
+            requested_inpaint_mode !=
+                mfgunlock::cudatemporal::InpaintMode::kV2Compatibility
+            ? mfgunlock::adaptivequality::ComponentVersion::kV3
+            : mfgunlock::adaptivequality::ExpectedComponentVersion(
+                  adaptive_profile,
+                  mfgunlock::adaptivequality::Component::kInpaint);
     const std::string adaptive_warp_report = AdaptiveComponentStatus(
         expected_warp,
         thin_geometry_last.result.validated_warp_blend.adaptive_version,
@@ -7265,6 +7386,41 @@ void OnRegisterOverlay(reshade::api::effect_runtime* runtime) {
            << '\n'
            << "Adaptive inpaint decision: "
            << adaptive_inpaint_report << '\n'
+           << "Inpaint V3.4 requested: "
+           << (requested_inpaint_mode ==
+                       mfgunlock::cudatemporal::InpaintMode::kTemporal
+                   ? "Temporal V3"
+                   : requested_inpaint_mode ==
+                             mfgunlock::cudatemporal::InpaintMode::kLocal
+                         ? "Local V3"
+                         : "V2 Compatibility")
+           << '\n'
+           << "Inpaint V3.4 cubin: "
+           << mfgunlock::blackwell::AdaptiveInpaintVariantName(
+                  blackwell_active_result.adaptive_inpaint_variant)
+           << (blackwell_active_result.adaptive_inpaint_variant ==
+                       mfgunlock::blackwell::AdaptiveInpaintVariant::kTemporal
+                   ? "; ABI 152 bytes; 48 registers; 784 B shared; zero stack/spill/local; .text=10,368 B; one u8 history load + one u8 store"
+                   : blackwell_active_result.adaptive_inpaint_variant ==
+                             mfgunlock::blackwell::AdaptiveInpaintVariant::kLocal
+                         ? "; 48 registers; 784 B shared; zero stack/spill/local; .text=9,344 B; zero global history access"
+                         : "; compatibility/fallback resources")
+           << '\n'
+           << "Inpaint V3.4 effective: "
+           << mfgunlock::cudatemporal::InpaintDetail() << '\n'
+           << "Inpaint V3.4 history: "
+           << mfgunlock::cudatemporal::g_inpaint_history_bytes.load(
+                  std::memory_order_relaxed)
+           << " bytes; combined used="
+           << (mfgunlock::cudatemporal::g_history_bytes.load(
+                   std::memory_order_relaxed) +
+               mfgunlock::cudatemporal::g_inpaint_history_bytes.load(
+                   std::memory_order_relaxed))
+           << "/" << mfgunlock::cudatemporal::kArenaLimit
+           << "; resets="
+           << mfgunlock::cudatemporal::g_history_resets.load(
+                  std::memory_order_relaxed)
+           << '\n'
            << "Directional scatter: "
            << (blackwell_active_result.adaptive_directional_scatter
                    ? "Provider-native signed coverage retained"
@@ -7291,7 +7447,7 @@ void OnRegisterOverlay(reshade::api::effect_runtime* runtime) {
                   std::memory_order_relaxed) << '\n'
            << "V3.2 CUDA hook fast path: "
            << (mfgunlock::cudatemporal::FastPathReady()
-                   ? "active; one atomic CUfunction comparison for non-target kernels"
+                   ? "active; one immutable dispatch-table atomic load for non-target kernels"
                    : "inactive/target association pending")
            << '\n'
            << "Quality refinement requested this session: "
@@ -7648,9 +7804,23 @@ void LoadConfig() {
   g_configured_adaptive_quality_v3_stability_mode.store(
       g_adaptive_quality_v3_stability_mode.load(std::memory_order_relaxed),
       std::memory_order_relaxed);
+  if (reshade::get_config_value(nullptr, kConfigSection,
+                                "AdaptiveQualityV3InpaintMode", value)) {
+    const auto normalized =
+        mfgunlock::cudatemporal::NormalizeInpaintMode(
+            static_cast<unsigned int>(value));
+    g_adaptive_quality_v3_inpaint_mode.store(
+        static_cast<unsigned int>(normalized), std::memory_order_relaxed);
+  }
+  g_configured_adaptive_quality_v3_inpaint_mode.store(
+      g_adaptive_quality_v3_inpaint_mode.load(std::memory_order_relaxed),
+      std::memory_order_relaxed);
   mfgunlock::cudatemporal::Configure(
       mfgunlock::cudatemporal::NormalizeMode(
           g_adaptive_quality_v3_stability_mode.load(
+              std::memory_order_relaxed)),
+      mfgunlock::cudatemporal::NormalizeInpaintMode(
+          g_adaptive_quality_v3_inpaint_mode.load(
               std::memory_order_relaxed)));
   if (reshade::get_config_value(nullptr, kConfigSection, "ExperimentalQualityRefinement", value))
     g_quality_refinement.store(value != 0, std::memory_order_relaxed);
@@ -7702,6 +7872,8 @@ void LoadConfig() {
           g_adaptive_quality_v3_stability_mode.load(
               std::memory_order_relaxed)) ==
       mfgunlock::cudatemporal::StabilityMode::kTemporal;
+  mfgunlock::blackwell::g_adaptive_quality_v3_inpaint_mode =
+      g_adaptive_quality_v3_inpaint_mode.load(std::memory_order_relaxed);
   mfgunlock::blackwell::g_geometry_confidence_v2_enabled =
       !adaptive_quality &&
       g_quality_refinement.load(std::memory_order_relaxed) &&
@@ -7951,6 +8123,21 @@ void LoadConfig() {
   }
   reshade::log::message(reshade::log::level::info,
                         stability_log.str().c_str());
+  const auto inpaint_mode =
+      mfgunlock::cudatemporal::NormalizeInpaintMode(
+          g_adaptive_quality_v3_inpaint_mode.load(
+              std::memory_order_relaxed));
+  std::ostringstream inpaint_log;
+  inpaint_log << "mfgunlock: Adaptive Quality V3.4 inpaint requested="
+              << (inpaint_mode ==
+                          mfgunlock::cudatemporal::InpaintMode::kTemporal
+                      ? "Temporal V3; effective=Local V3 until exact kernel/ABI/phase validation."
+                      : inpaint_mode ==
+                                mfgunlock::cudatemporal::InpaintMode::kLocal
+                            ? "Local V3; confidence history disabled."
+                            : "V2 Compatibility; explicit compatibility mode or invalid-value fallback.");
+  reshade::log::message(reshade::log::level::info,
+                        inpaint_log.str().c_str());
 }
 
 }  // namespace

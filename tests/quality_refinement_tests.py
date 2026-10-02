@@ -150,6 +150,17 @@ def main():
     inpaint = builder.patch_adaptive_inpaint_decision_v1(inpaint)
     assert inpaint.count('setp.gtu.ftz.f32') == 2
     assert inpaint.count('MFGUNLOCK_INPAINT_DECISION_NONFINITE_V1') == 1
+    temporal_inpaint = builder._inpaint_temporal_program()
+    assert temporal_inpaint.count('ld.global.u8') == 1
+    assert temporal_inpaint.count('st.global.u8') == 1
+    assert 'tex.' not in temporal_inpaint
+    assert 'ld.global.v4.u32' in temporal_inpaint
+    assert 'mfgunlock_v34_inpaint_control+32' in temporal_inpaint
+    assert 'mov.u32 %qir4, 0;' in temporal_inpaint
+    assert 'mov.u32 %qir5, 2;' in temporal_inpaint
+    assert 'setp.ge.u32 %qip1, %qir1, 47;' in temporal_inpaint
+    assert 'setp.le.u32 %qip2, %qir6, 4;' in temporal_inpaint
+    assert 'or.pred %p33, %p33, %qip1;' in temporal_inpaint
     print('quality refinement contracts passed; runtime image quality remains unverified')
 
 

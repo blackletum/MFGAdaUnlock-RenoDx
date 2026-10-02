@@ -790,6 +790,148 @@ def patch_adaptive_inpaint_decision_v2(source: str) -> str:
     return source
 
 
+def patch_adaptive_inpaint_decision_v3_local(source: str) -> str:
+    """Tag hard rejects while preserving the V2 output decision bit-exactly.
+
+    Bit zero remains the provider's needs-inpainting mask. Bit one is private
+    metadata consumed only by the temporal variant after the 3x3 reduction.
+    Every existing downstream test is non-zero based, so Local V3 produces the
+    same decision as V2 and introduces no global or texture access.
+    """
+    source = replace_once(
+        source, ".reg .pred %p<84>;\n",
+        ".reg .pred %p<84>;\n.reg .pred %qip<2>;\n",
+        "inpaint V3 local predicate declaration")
+    for index, (result, invalid, value, scratch) in enumerate((
+            ("%rs139", "%p5", "%f39", "%f40"),
+            ("%rs140", "%p12", "%f43", "%f44"))):
+        source = replace_once(
+            source, f"mov.u16 {result}, 1;\n",
+            f"mov.u16 {result}, 3;\n",
+            f"inpaint V3 hard coordinate tag {index}")
+        anchor = (
+            f"setp.gt.ftz.f32 {'%p6' if index == 0 else '%p13'}, "
+            f"{value}, 0f00000000;\n"
+            f"selp.u16 {result}, 1, 0, "
+            f"{'%p6' if index == 0 else '%p13'};\n"
+        )
+        native_pred = "%p6" if index == 0 else "%p13"
+        program = (
+            ("// MFGUNLOCK_INPAINT_LOCAL_V3\n" if index == 0 else "")
+            + f"abs.f32 {scratch}, {value};\n"
+            + f"setp.geu.f32 %qip0, {scratch}, 0f7F800000;\n"
+            + f"setp.gt.ftz.f32 {native_pred}, {value}, 0f00000000;\n"
+            + f"selp.u16 {result}, 1, 0, {native_pred};\n"
+            + f"@%qip0 mov.u16 {result}, 3;\n"
+        )
+        source = replace_once(source, anchor, program,
+                              f"inpaint V3 local decision {index}")
+    return source
+
+
+def _inpaint_temporal_program() -> str:
+    hard_sources = (
+        "%rs101", "%rs111", "%rs131", "%rs98", "%rs134",
+        "%rs128", "%rs90", "%rs75", "%rs138")
+    hard_reduce = [f"mov.u16 %qis0, {hard_sources[0]};"]
+    hard_reduce += [f"or.b16 %qis0, %qis0, {item};"
+                    for item in hard_sources[1:]]
+    return "\n".join([
+        "// MFGUNLOCK_INPAINT_TEMPORAL_V34",
+        *hard_reduce,
+        "and.b16 %qis0, %qis0, 2;",
+        "setp.ne.u16 %qip0, %qis0, 0;",
+        "ld.global.u32 %qir0, [mfgunlock_v34_inpaint_control+8];",
+        "setp.eq.u32 %qip1, %qir0, 1;",
+        "@!%qip1 bra MFGUNLOCK_INPAINT_HISTORY_DONE_V34;",
+        "ld.global.u64 %qird0, [mfgunlock_v34_inpaint_control];",
+        "setp.ne.u64 %qip1, %qird0, 0;",
+        "@!%qip1 bra MFGUNLOCK_INPAINT_HISTORY_DONE_V34;",
+        "ld.global.v4.u32 {%qir1,%qir2,%qir3,%qir4}, [mfgunlock_v34_inpaint_control+16];",
+        "setp.eq.u32 %qip1, %qir1, %r57;",
+        "setp.eq.u32 %qip2, %qir2, %r58;",
+        "and.pred %qip1, %qip1, %qip2;",
+        "@!%qip1 bra MFGUNLOCK_INPAINT_HISTORY_DONE_V34;",
+        "ld.global.v4.u32 {%qir5,%qir6,%qir7,%qir8}, [mfgunlock_v34_inpaint_control+32];",
+        "mad.lo.u32 %qir9, %qir5, 2, %qir6;",
+        "mul.lo.u32 %qir9, %qir9, %qir4;",
+        "mad.lo.u32 %qir10, %r56, %qir1, %r13;",
+        "add.u32 %qir9, %qir9, %qir10;",
+        "cvt.u64.u32 %qird1, %qir9;",
+        "add.u64 %qird1, %qird0, %qird1;",
+        "ld.global.u8 %qir0, [%qird1];",
+        "selp.u32 %qir1, 62, 0, %p33;",
+        "@%qip0 bra MFGUNLOCK_INPAINT_HISTORY_HARD_V34;",
+        "setp.eq.u32 %qip1, %qir0, 255;",
+        "@%qip1 bra MFGUNLOCK_INPAINT_HISTORY_FIRST_V34;",
+        "and.b32 %qir2, %qir0, 63;",
+        "shr.u32 %qir3, %qir0, 6;",
+        "mov.u32 %qir4, %qir1;",
+        "mov.u32 %qir5, %qir3;",
+        "setp.gt.u32 %qip1, %qir1, %qir2;",
+        "@%qip1 add.u32 %qir4, %qir2, 12;",
+        "@%qip1 min.u32 %qir4, %qir4, %qir1;",
+        "setp.lt.u32 %qip2, %qir1, %qir2;",
+        "setp.eq.u32 %qip3, %qir3, 1;",
+        "and.pred %qip3, %qip2, %qip3;",
+        "@%qip3 add.u32 %qir4, %qir1, 12;",
+        "@%qip3 min.u32 %qir4, %qir4, %qir2;",
+        "@%qip3 mov.u32 %qir5, 2;",
+        "sub.s32 %qir6, %qir1, %qir2;",
+        "abs.s32 %qir6, %qir6;",
+        "setp.ge.u32 %qip1, %qir1, 47;",
+        "setp.le.u32 %qip2, %qir6, 4;",
+        "and.pred %qip1, %qip1, %qip2;",
+        "@!%qip1 bra MFGUNLOCK_INPAINT_HISTORY_NOT_STABLE_V34;",
+        "setp.eq.u32 %qip2, %qir3, 3;",
+        "setp.eq.u32 %qip3, %qir3, 1;",
+        "or.pred %qip2, %qip2, %qip3;",
+        "selp.u32 %qir5, 1, 3, %qip2;",
+        "bra MFGUNLOCK_INPAINT_HISTORY_PACK_V34;",
+        "MFGUNLOCK_INPAINT_HISTORY_NOT_STABLE_V34:",
+        "setp.eq.u32 %qip2, %qir5, 3;",
+        "@%qip2 mov.u32 %qir5, 0;",
+        "bra MFGUNLOCK_INPAINT_HISTORY_PACK_V34;",
+        "MFGUNLOCK_INPAINT_HISTORY_FIRST_V34:",
+        "setp.ge.u32 %qip1, %qir1, 47;",
+        "selp.u32 %qir5, 3, 0, %qip1;",
+        "mov.u32 %qir4, %qir1;",
+        "bra MFGUNLOCK_INPAINT_HISTORY_PACK_V34;",
+        "MFGUNLOCK_INPAINT_HISTORY_HARD_V34:",
+        "mov.u32 %qir4, 0;",
+        "mov.u32 %qir5, 0;",
+        "MFGUNLOCK_INPAINT_HISTORY_PACK_V34:",
+        "shl.b32 %qir5, %qir5, 6;",
+        "or.b32 %qir5, %qir5, %qir4;",
+        "st.global.u8 [%qird1], %qir5;",
+        "setp.ne.u32 %qip1, %qir4, 0;",
+        "or.pred %p33, %p33, %qip1;",
+        "MFGUNLOCK_INPAINT_HISTORY_DONE_V34:",
+    ]) + "\n"
+
+
+def patch_adaptive_inpaint_decision_v3_temporal(source: str) -> str:
+    source = patch_adaptive_inpaint_decision_v3_local(source)
+    source = replace_once(
+        source, ".address_size 64\n",
+        ".address_size 64\n\n"
+        ".visible .global .align 4 .u32 mfgunlock_v34_inpaint_magic = "
+        "0x56333449;\n"
+        ".visible .global .align 16 .b8 mfgunlock_v34_inpaint_control[48];\n",
+        "inpaint V3.4 temporal globals")
+    source = replace_once(
+        source, ".reg .pred %qip<2>;\n",
+        ".reg .pred %qip<4>;\n"
+        ".reg .b16 %qis<1>;\n"
+        ".reg .b32 %qir<11>;\n"
+        ".reg .b64 %qird<2>;\n",
+        "inpaint V3.4 temporal registers")
+    anchor = "@%p33 bra $L__BB0_9;\n"
+    return replace_once(source, anchor,
+                        _inpaint_temporal_program() + anchor,
+                        "inpaint V3.4 temporal decision")
+
+
 def patch_validated_warp_blend(source: str) -> str:
     """Apply an independently authored conservative warp-validation experiment.
 
@@ -1070,6 +1212,10 @@ EXTRA_PATCHERS = {
     ],
     "Kernel_OutputPull": [
         ("adaptive_inpaint_decision_v2", patch_adaptive_inpaint_decision_v2),
+        ("adaptive_inpaint_decision_v3_local",
+         patch_adaptive_inpaint_decision_v3_local),
+        ("adaptive_inpaint_decision_v3_temporal",
+         patch_adaptive_inpaint_decision_v3_temporal),
     ],
 }
 
@@ -1167,13 +1313,18 @@ def compile_ptx(ptxas: Path | None, driver: CudaDriverCompiler | None,
     cubin_path = directory / f"{name}.cubin"
     source_path.write_text(source, encoding="ascii", newline="\n")
     command = [str(ptxas), "-arch=sm_89", "-O3", "-v"]
-    if name in {"adaptive_quality_geometry_v31_local",
-                "adaptive_quality_geometry_v31_temporal"}:
+    strict_ptxas = name in {
+        "adaptive_quality_geometry_v31_local",
+        "adaptive_quality_geometry_v31_temporal",
+        "adaptive_inpaint_decision_v3_local",
+        "adaptive_inpaint_decision_v3_temporal",
+    }
+    if strict_ptxas:
         # Forty registers is the Ada occupancy boundary for this 324-thread
         # kernel. Override the provider's permissive directive, but retain the
         # hard zero-spill/local-storage gate below.
         command += ["--warn-on-spills", "--override-directive-values",
-                    "-maxrregcount=40"]
+                    f"-maxrregcount={40 if 'geometry' in name else 48}"]
     command += [str(source_path), "-o", str(cubin_path)]
     result = subprocess.run(
         command,
@@ -1184,8 +1335,7 @@ def compile_ptx(ptxas: Path | None, driver: CudaDriverCompiler | None,
         raise RuntimeError(
             f"ptxas failed for {name}:\n{result.stdout}\n{result.stderr}"
         )
-    if name in {"adaptive_quality_geometry_v31_local",
-                "adaptive_quality_geometry_v31_temporal"}:
+    if strict_ptxas:
         diagnostics = result.stdout + "\n" + result.stderr
         spill = re.search(
             r"(\d+) bytes spill stores,\s*(\d+) bytes spill loads",
@@ -1384,9 +1534,18 @@ def main() -> None:
                         is_v31_temporal = (
                             variant_name == "adaptive_quality_geometry_v31_temporal")
                         is_v31_geometry = is_v31_local or is_v31_temporal
+                        is_inpaint_v3_local = (
+                            variant_name == "adaptive_inpaint_decision_v3_local")
+                        is_inpaint_v3_temporal = (
+                            variant_name == "adaptive_inpaint_decision_v3_temporal")
+                        is_inpaint_v3 = (is_inpaint_v3_local or
+                                         is_inpaint_v3_temporal)
                         load_reference = (
                             patch_adaptive_geometry_v2(baseline_source)
                             if is_v31_geometry
+                            else patch_adaptive_inpaint_decision_v2(
+                                baseline_source)
+                            if is_inpaint_v3
                             else baseline_source
                         )
                         if (variant_name == "adaptive_quality_blend_v3" and
@@ -1417,16 +1576,41 @@ def main() -> None:
                                 raise ValueError(
                                     f"{variant_name}: compact temporal load/store gate failed"
                                 )
+                        if is_inpaint_v3_local:
+                            if (patched_source.count("tex.") !=
+                                    load_reference.count("tex.") or
+                                    patched_source.count("ld.global") !=
+                                    load_reference.count("ld.global") or
+                                    patched_source.count("st.global") !=
+                                    load_reference.count("st.global")):
+                                raise ValueError(
+                                    f"{variant_name}: Local V3 introduced a global or texture access"
+                                )
+                        if is_inpaint_v3_temporal:
+                            if (patched_source.count("tex.") !=
+                                    load_reference.count("tex.") or
+                                    patched_source.count("ld.global") !=
+                                    load_reference.count("ld.global") + 5 or
+                                    patched_source.count("st.global") !=
+                                    load_reference.count("st.global") + 1 or
+                                    patched_source.count("ld.global.u8") !=
+                                    load_reference.count("ld.global.u8") + 1 or
+                                    patched_source.count("st.global.u8") !=
+                                    load_reference.count("st.global.u8") + 1):
+                                raise ValueError(
+                                    f"{variant_name}: temporal confidence byte load/store gate failed"
+                                )
                         try:
                             replacement = compile_ptx(
                                 args.ptxas, driver, patched_source, directory,
                                 variant_name)
                         except RuntimeError as error:
-                            if not is_v31_temporal or args.ptxas is None:
+                            if (not is_v31_temporal and
+                                    not is_inpaint_v3_temporal) or args.ptxas is None:
                                 raise
                             print(
-                                "  skip adaptive_quality_geometry_v31_temporal: "
-                                "ptxas gate failed; the separately generated Local Stable cubin remains available:\n"
+                                f"  skip {variant_name}: "
+                                "ptxas gate failed; the separately generated Local cubin remains available:\n"
                                 f"{error}"
                             )
                             continue
@@ -1472,11 +1656,36 @@ def main() -> None:
                                     f"{replacement_fingerprint}, "
                                     f"local={replacement_local}"
                                 )
+                        if is_inpaint_v3:
+                            if args.ptxas is None:
+                                print(
+                                    f"  skip {variant_name}: driver JIT is "
+                                    "validation-only; release inpaint V3 requires ptxas"
+                                )
+                                continue
+                            text, shared, registers = replacement_fingerprint
+                            resource_gate_failed = (
+                                shared != 784 or registers > 48 or
+                                replacement_local)
+                            if resource_gate_failed:
+                                if is_inpaint_v3_temporal:
+                                    print(
+                                        f"  skip {variant_name}: resource gate failed; "
+                                        "Local V3 remains available size="
+                                        f"{len(replacement)}, fp={replacement_fingerprint}, "
+                                        f"local={replacement_local}"
+                                    )
+                                    continue
+                                raise ValueError(
+                                    f"{variant_name}: resource gate failed "
+                                    f"size={len(replacement)}, fp={replacement_fingerprint}, "
+                                    f"local={replacement_local}"
+                                )
                         if len(baseline) > len(ada_cubin):
                             print(f"  skip {variant_name}: baseline {len(baseline)} > slot {len(ada_cubin)}")
                             continue
                         if (len(replacement) > len(ada_cubin) and not
-                                (is_v31_geometry and
+                                ((is_v31_geometry or is_inpaint_v3) and
                                  args.allow_oversized_v3)):
                             print(f"  skip {variant_name}: replacement {len(replacement)} > slot {len(ada_cubin)}")
                             continue

@@ -546,9 +546,44 @@ searches the game directory for a replacement driver DLL.
 Any mismatch, unsupported API, allocation failure or size above 64 MiB falls
 back to `Local Stable`; unrelated kernels pass through unchanged. The overlay
 and diagnostics report the requested and effective mode and the precise
-fallback reason. After the target kernel is associated, every unrelated launch
-performs only one atomic `CUfunction` comparison before the original trampoline:
+fallback reason. After both requested target kernels are associated, every
+unrelated launch performs one atomic immutable-dispatch load and two pointer
+comparisons before the original trampoline:
 there is no lock, hash lookup, name/module/ABI query or per-launch logging.
+
+### Adaptive Quality V3.4 Temporal Inpaint Stability
+
+V3.4 leaves the V3.2 warp, photometric thresholds and geometry cubins
+unchanged. It adds separate decision-only inpaint variants. `Local V3` tags
+coordinate and non-finite hard rejects inside the existing 3x3 tile while
+remaining decision-equivalent to V2 and adding no texture or global-memory
+access. `Temporal V3` keeps one encoded confidence byte per pixel, direction
+and symmetric phase bucket; reconstructed color, depth and motion vectors are
+never retained.
+
+The byte uses six confidence bits and four states: Cold, Armed, GraceUsed and
+RearmSeen. Hard rejects clear confidence immediately. An Armed soft ambiguity
+may retain at most 12/62 confidence for one observation; repeated drops are
+immediate. Recovery is limited to 12/62 per source frame and rearming requires
+two stable high-confidence observations. NVIDIA's native inpaint decision is
+always a lower bound, so the temporal path can never reject native work.
+
+`Kernel_OutputPull` has no temporal-phase argument. The addon therefore accepts
+only the phase validated from the immediately preceding
+`Kernel_EstimateIntermMvecsScatter` launch in the same module, context and
+stream. Missing, duplicated or ambiguous sequencing falls back only the
+inpaint component to Local V3. Geometry and inpaint share a bounded 96 MiB
+arena; at 4K/6x they use 49,766,400 bytes each (99,532,800 bytes total). If the
+combined requirement does not fit, inpaint falls back first and temporal
+geometry remains available.
+
+The Local cubin uses 48 registers, 784 bytes of shared memory and zero
+stack/spill/local memory, with 9,344 bytes of `.text`. Temporal uses the same
+register/shared limits, 10,368 bytes of `.text`, and exactly one 8-bit history
+read plus one 8-bit history write per output pixel. During the test phase,
+`Temporal V3` is the default when the V3.4 setting is absent. Existing saved
+choices remain unchanged, and invalid values still normalize to
+`V2 Compatibility`.
 
 ### Reflex / Pacing Lab V3.3
 
@@ -746,6 +781,7 @@ Written to your `ReShade.ini` under `[RenoDX.MFGUnlock]`:
 | `AdaptiveQualityV3DirectionalBorder` | `1` | Developer A/B control for motion-directional border tapering. Off retains V2's symmetric taper; restart required |
 | `AdaptiveQualityV3OrientedGeometry` | `1` | Developer A/B control for motion-oriented cardinal/diagonal support. Off deliberately requests geometry V2; restart required |
 | `AdaptiveQualityV3StabilityMode` | `2` | `1` selects tile-only Local Stable; `2` requests Temporal Stable (default). Invalid values normalize to Local Stable. Temporal mode activates only after exact-provider CUDA/ABI/phase validation and otherwise falls back locally; restart required |
+| `AdaptiveQualityV3InpaintMode` | `2` | `0` keeps V2 Compatibility, `1` selects Local V3, and `2` requests Temporal V3 (default when the key is absent). Existing saved choices remain unchanged; invalid values normalize to V2 Compatibility; restart required |
 | `ThinGeometryIntermediateScatter` | `1` | Experimental recommended default: retains more motion information while constructing intermediate generated frames; keeps the separate depth test and requires the validated full Blackwell path. Disable per game if it adds ghosting or disocclusion artifacts |
 | `ThinGeometryValidatedWarpBlend` | `1` | Experimental recommended default paired with Intermediate scatter retention: validates warped candidates before gradually increasing their blend weight; may reduce thin-detail flicker but can increase temporal persistence. Requires a restart |
 | `ThinGeometryPreviousScatter` | `0` | Unstable advanced research control for a separate previous-to-current motion-rejection path; not recommended for normal use |

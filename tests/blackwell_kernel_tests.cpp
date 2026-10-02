@@ -44,6 +44,8 @@ int main() {
   bool found_adaptive_geometry_v31_temporal = false;
   bool found_adaptive_inpaint_v1 = false;
   bool found_adaptive_inpaint_v2 = false;
+  bool found_adaptive_inpaint_v3_local = false;
+  bool found_adaptive_inpaint_v3_temporal = false;
   for (const auto& replacement : generated_thin_geometry::kThinGeometryCubins) {
     CHECK(replacement.data != nullptr);
     CHECK(replacement.size != 0);
@@ -52,8 +54,12 @@ int main() {
         (mechanism == "adaptive_quality_geometry_v31_local" ||
          mechanism == "adaptive_quality_geometry_v31_temporal") &&
         replacement.size > replacement.slot_size;
+    const bool redirected_inpaint_v3 =
+        (mechanism == "adaptive_inpaint_decision_v3_local" ||
+         mechanism == "adaptive_inpaint_decision_v3_temporal") &&
+        replacement.size > replacement.slot_size;
     CHECK(replacement.size <= replacement.slot_size ||
-          redirected_geometry_v3);
+          redirected_geometry_v3 || redirected_inpaint_v3);
     CHECK(replacement.source_fnv1a64 != 0);
     CHECK(mechanism == "intermediate_scatter" ||
           mechanism == "geometry_motion" ||
@@ -66,7 +72,9 @@ int main() {
           mechanism == "adaptive_quality_geometry_v31_local" ||
           mechanism == "adaptive_quality_geometry_v31_temporal" ||
           mechanism == "adaptive_inpaint_decision_v1" ||
-          mechanism == "adaptive_inpaint_decision_v2");
+          mechanism == "adaptive_inpaint_decision_v2" ||
+          mechanism == "adaptive_inpaint_decision_v3_local" ||
+          mechanism == "adaptive_inpaint_decision_v3_temporal");
     found_intermediate_scatter |= mechanism == "intermediate_scatter";
     found_silhouette_guard |= mechanism == "geometry_motion_depth";
     found_aggressive_silhouette_guard |=
@@ -83,6 +91,10 @@ int main() {
         mechanism == "adaptive_inpaint_decision_v1";
     found_adaptive_inpaint_v2 |=
         mechanism == "adaptive_inpaint_decision_v2";
+    found_adaptive_inpaint_v3_local |=
+        mechanism == "adaptive_inpaint_decision_v3_local";
+    found_adaptive_inpaint_v3_temporal |=
+        mechanism == "adaptive_inpaint_decision_v3_temporal";
     uint64_t expected_v1_hash = 0;
     if (mechanism == "intermediate_scatter")
       expected_v1_hash = 0xa1e796760d8efc27ull;
@@ -113,7 +125,9 @@ int main() {
         mechanism == "adaptive_quality_geometry_v31_local" ||
         mechanism == "adaptive_quality_geometry_v31_temporal" ||
         mechanism == "adaptive_inpaint_decision_v1" ||
-        mechanism == "adaptive_inpaint_decision_v2") {
+        mechanism == "adaptive_inpaint_decision_v2" ||
+        mechanism == "adaptive_inpaint_decision_v3_local" ||
+        mechanism == "adaptive_inpaint_decision_v3_temporal") {
       internal::ElfFingerprint compiled{};
       CHECK(internal::FingerprintElf(replacement.data, replacement.size,
                                      compiled));
@@ -122,6 +136,9 @@ int main() {
         if (mechanism == "adaptive_quality_geometry_v31_local")
           CHECK(compiled.text <= 39552u);
         CHECK(compiled.registers == 40u);
+      } else if (redirected_inpaint_v3) {
+        CHECK(compiled.shared == 784u);
+        CHECK(compiled.registers <= 48u);
       } else {
         CHECK(compiled.text <= replacement.source_text);
         CHECK(compiled.registers <=
@@ -141,6 +158,9 @@ int main() {
   CHECK(!found_adaptive_geometry_v31_local || found_adaptive_geometry_v2);
   CHECK(found_adaptive_inpaint_v1);
   CHECK(found_adaptive_inpaint_v2);
+  CHECK(!found_adaptive_inpaint_v3_temporal ||
+        found_adaptive_inpaint_v3_local);
+  CHECK(!found_adaptive_inpaint_v3_local || found_adaptive_inpaint_v2);
 
   // Oversized geometry V3 is installed by redirecting exact fatbin descriptor
   // references, never by writing beyond the provider's original cubin slot.
