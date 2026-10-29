@@ -54,10 +54,11 @@ struct Gpu {
     b.Transition={r,D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,from,to}; list->ResourceBarrier(1,&b);
   }
   // An RGBA8 texture left in PRESENT (COMMON); `target` adds render-target use.
-  ComPtr<ID3D12Resource> Texture(const std::vector<uint32_t>& pixels,unsigned width,unsigned height,bool target=false) {
+  ComPtr<ID3D12Resource> Texture(const std::vector<uint32_t>& pixels,unsigned width,unsigned height,bool target=false,
+      DXGI_FORMAT format=DXGI_FORMAT_R8G8B8A8_UNORM) {
     D3D12_HEAP_PROPERTIES heap{D3D12_HEAP_TYPE_DEFAULT}; D3D12_RESOURCE_DESC d{};
     d.Dimension=D3D12_RESOURCE_DIMENSION_TEXTURE2D; d.Width=width; d.Height=height; d.DepthOrArraySize=1; d.MipLevels=1;
-    d.Format=DXGI_FORMAT_R8G8B8A8_UNORM; d.SampleDesc.Count=1;
+    d.Format=format; d.SampleDesc.Count=1;
     if(target) d.Flags=D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
     ComPtr<ID3D12Resource> texture;
     Check(device->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&d,D3D12_RESOURCE_STATE_COPY_DEST,nullptr,IID_PPV_ARGS(&texture)),"texture");
@@ -106,7 +107,8 @@ uint32_t Clean(unsigned x,unsigned y,unsigned frame) { return Pack(.1f+.02f*floa
 uint32_t Hud(unsigned frame) { return frame?Pack(.9f,.8f,.1f):Pack(.7f,.95f,.2f); }
 struct Captured { std::vector<uint32_t> back, clean; };
 // Captures one real frame with id `id`; `hud(x,y)` returns true where HUD is.
-template<class F> Captured CaptureFrame(Gpu& gpu,HudInterpolator& hud,uint64_t id,unsigned frame,F covered,uint32_t color) {
+template<class F> Captured CaptureFrame(Gpu& gpu,HudInterpolator& hud,uint64_t id,unsigned frame,F covered,uint32_t color,
+    const HudInterpolator::SceneMotion& scene={}) {
   Captured c;
   c.back.resize(size_t(kWidth)*kHeight); c.clean.resize(c.back.size());
   for(unsigned y=0;y<kHeight;++y) for(unsigned x=0;x<kWidth;++x) {
@@ -116,7 +118,7 @@ template<class F> Captured CaptureFrame(Gpu& gpu,HudInterpolator& hud,uint64_t i
   }
   auto b=gpu.Texture(c.back,kWidth,kHeight), cl=gpu.Texture(c.clean,kWidth,kHeight);
   ID3D12Resource* hudless{}; ID3D12Resource* ui{};
-  Require(hud.Capture(id,b.Get(),D3D12_RESOURCE_STATE_PRESENT,cl.Get(),D3D12_RESOURCE_STATE_PRESENT,{0,0,kWidth,kHeight},
+  Require(hud.Capture(id,b.Get(),D3D12_RESOURCE_STATE_PRESENT,cl.Get(),D3D12_RESOURCE_STATE_PRESENT,{0,0,kWidth,kHeight},scene,
       &hudless,&ui)!=nullptr && hudless && ui,"capture");
   Require(hud.SubmitCapture(gpu.queue.Get()),"submit capture");
   gpu.Flush();
@@ -170,11 +172,30 @@ int main() {
       for(unsigned x:{40u,41u,42u,54u,55u}) Require(out[size_t(y)*kWidth+x]==scene[0],"moving HUD left a trail");
     }
 
+    // World-anchored HUD on a fast camera turn: a marker moves 100 px, beyond
+    // the +-64 px search around no motion. The scene's motion vectors (here a
+    // uniform -100 px, R16G16_FLOAT, one unit per pixel) seed the search, so
+    // at t = 0.5 the marker is drawn halfway, x in [70,78).
+    const std::vector<uint32_t> vectors(scene.size(),0x0000D640u); // half(-100), half(0)
+    auto field=gpu.Texture(vectors,kWidth,kHeight,false,DXGI_FORMAT_R16G16_FLOAT);
+    const HudInterpolator::SceneMotion seed{field.Get(),D3D12_RESOURCE_STATE_PRESENT,{0,0,kWidth,kHeight},1.0f,1.0f};
+    CaptureFrame(gpu,hud,30,0,block(20),color,seed);
+    CaptureFrame(gpu,hud,31,1,block(120),color,seed);
+    Require(hud.Snapshot().sceneSeeded>=1,"scene motion did not seed the search");
+    auto fast=gpu.Texture(scene,kWidth,kHeight,true);
+    Require(hud.Compose(gpu.queue.Get(),fast.Get(),31,0.5f),"compose fast");
+    gpu.Flush();
+    const auto turned=gpu.Read(fast.Get());
+    for(unsigned y=9;y<15;++y) {
+      for(unsigned x=71;x<77;++x) Require(turned[size_t(y)*kWidth+x]==color,"fast world-anchored HUD not drawn halfway");
+      for(unsigned x:{20u,25u,121u,126u}) Require(turned[size_t(y)*kWidth+x]==scene[0],"fast world-anchored HUD left a trail");
+    }
+
     // An id that was never captured: the generated frame is left as is.
     auto untouched=gpu.Texture(scene,kWidth,kHeight,true);
     Require(!hud.Compose(gpu.queue.Get(),untouched.Get(),99,0.5f),"unknown frame composed");
     Require(gpu.Read(untouched.Get())==scene,"unknown frame changed the output");
-    std::printf("PASS: static HUD cross-faded (max error %.4f), moving HUD drawn halfway without a trail, unknown frame untouched\n",worst);
+    std::printf("PASS: static HUD cross-faded (max error %.4f), moving HUD drawn halfway without a trail, 100 px world-anchored HUD followed via scene motion, unknown frame untouched\n",worst);
     return 0;
   } catch(const std::exception& e) { std::fprintf(stderr,"%s\n",e.what()); return 1; }
 }

@@ -43,7 +43,7 @@ bool HudInterpolator::Initialize(ID3D12Device* target,DXGI_FORMAT output) {
   if(!SupportedFormat(format)) return Fail(DXGI_ERROR_UNSUPPORTED);
   HRESULT hr;
   {
-    D3D12_DESCRIPTOR_RANGE range{D3D12_DESCRIPTOR_RANGE_TYPE_SRV,3,0,0,0};
+    D3D12_DESCRIPTOR_RANGE range{D3D12_DESCRIPTOR_RANGE_TYPE_SRV,4,0,0,0};
     D3D12_ROOT_PARAMETER parameters[2]{};
     parameters[0].ParameterType=D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
     parameters[0].Constants={0,0,6}; parameters[0].ShaderVisibility=D3D12_SHADER_VISIBILITY_PIXEL;
@@ -59,11 +59,11 @@ bool HudInterpolator::Initialize(ID3D12Device* target,DXGI_FORMAT output) {
   }
   {
     D3D12_DESCRIPTOR_RANGE ranges[2]{};
-    ranges[0]={D3D12_DESCRIPTOR_RANGE_TYPE_SRV,2,0,0,0};
-    ranges[1]={D3D12_DESCRIPTOR_RANGE_TYPE_UAV,2,0,0,2};
+    ranges[0]={D3D12_DESCRIPTOR_RANGE_TYPE_SRV,3,0,0,0};
+    ranges[1]={D3D12_DESCRIPTOR_RANGE_TYPE_UAV,3,0,0,3};
     D3D12_ROOT_PARAMETER parameters[2]{};
     parameters[0].ParameterType=D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-    parameters[0].Constants={0,0,5};
+    parameters[0].Constants={0,0,12};
     parameters[1].ParameterType=D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
     parameters[1].DescriptorTable={2,ranges};
     D3D12_ROOT_SIGNATURE_DESC desc{2,parameters,0,nullptr,D3D12_ROOT_SIGNATURE_FLAG_NONE};
@@ -91,8 +91,8 @@ bool HudInterpolator::Initialize(ID3D12Device* target,DXGI_FORMAT output) {
   if(FAILED(hr=device->CreateComputePipelineState(&compute,IID_PPV_ARGS(&layerPipeline)))) return Fail(hr);
   compute.CS={g_native_hud_motion_cs,sizeof(g_native_hud_motion_cs)};
   if(FAILED(hr=device->CreateComputePipelineState(&compute,IID_PPV_ARGS(&motionPipeline)))) return Fail(hr);
-  D3D12_DESCRIPTOR_HEAP_DESC srv{D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,kComposeSlots*3,D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE,0};
-  D3D12_DESCRIPTOR_HEAP_DESC computeDesc{D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,kSlots*8,D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE,0};
+  D3D12_DESCRIPTOR_HEAP_DESC srv{D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,kComposeSlots*4,D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE,0};
+  D3D12_DESCRIPTOR_HEAP_DESC computeDesc{D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,kSlots*12,D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE,0};
   D3D12_DESCRIPTOR_HEAP_DESC rtv{D3D12_DESCRIPTOR_HEAP_TYPE_RTV,kComposeSlots+1,D3D12_DESCRIPTOR_HEAP_FLAG_NONE,0};
   if(FAILED(hr=device->CreateDescriptorHeap(&srv,IID_PPV_ARGS(&srvHeap)))
       || FAILED(hr=device->CreateDescriptorHeap(&computeDesc,IID_PPV_ARGS(&computeHeap)))
@@ -127,7 +127,7 @@ bool HudInterpolator::Ensure(ComPtr<ID3D12Resource>& texture,DXGI_FORMAT texture
   return SUCCEEDED(hr)?true:Fail(hr);
 }
 ID3D12GraphicsCommandList* HudInterpolator::Capture(uint64_t id,ID3D12Resource* backbuffer,D3D12_RESOURCE_STATES backState,
-    ID3D12Resource* clean,D3D12_RESOURCE_STATES cleanState,const DejitterRegion& area,
+    ID3D12Resource* clean,D3D12_RESOURCE_STATES cleanState,const DejitterRegion& area,const SceneMotion& scene,
     ID3D12Resource** hudless,ID3D12Resource** ui) {
   std::lock_guard guard(lock);
   const auto bd=backbuffer?backbuffer->GetDesc():D3D12_RESOURCE_DESC{};
@@ -147,6 +147,7 @@ ID3D12GraphicsCommandList* HudInterpolator::Capture(uint64_t id,ID3D12Resource* 
       || !Ensure(slot.clean,format,width,height,D3D12_RESOURCE_FLAG_NONE,kReadable)
       || !Ensure(slot.layer,kLayerFormat,width,height,uav,kReadable)
       || !Ensure(slot.motion,kMotionFormat,blocksX,blocksY,uav,kReadable)
+      || !Ensure(slot.sceneField,kMotionFormat,blocksX,blocksY,uav,kReadable)
       || !Ensure(emptyUi,format,width,height,D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,kReadable)) return nullptr;
   if(emptyWidth!=width || emptyHeight!=height) { emptyCleared=false; emptyWidth=width; emptyHeight=height; }
   // The HUD's motion needs the previous real frame, captured at this size.
@@ -181,10 +182,10 @@ ID3D12GraphicsCommandList* HudInterpolator::Capture(uint64_t id,ID3D12Resource* 
   // Two descriptor tables per slot: the layer pass and the motion pass. The
   // unused UAV of each pass is a null descriptor.
   const auto cpuBase=[&](uint32_t table) {
-    auto cpu=computeHeap->GetCPUDescriptorHandleForHeapStart(); cpu.ptr+=SIZE_T(captureSlot*8+table*4)*srvSize; return cpu;
+    auto cpu=computeHeap->GetCPUDescriptorHandleForHeapStart(); cpu.ptr+=SIZE_T(captureSlot*12+table*6)*srvSize; return cpu;
   };
   const auto gpuBase=[&](uint32_t table) {
-    auto gpu=computeHeap->GetGPUDescriptorHandleForHeapStart(); gpu.ptr+=UINT64(captureSlot*8+table*4)*srvSize; return gpu;
+    auto gpu=computeHeap->GetGPUDescriptorHandleForHeapStart(); gpu.ptr+=UINT64(captureSlot*12+table*6)*srvSize; return gpu;
   };
   const auto srvAt=[&](D3D12_CPU_DESCRIPTOR_HANDLE cpu,ID3D12Resource* resource,DXGI_FORMAT viewFormat) {
     D3D12_SHADER_RESOURCE_VIEW_DESC view{}; view.Format=viewFormat; view.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D;
@@ -200,23 +201,43 @@ ID3D12GraphicsCommandList* HudInterpolator::Capture(uint64_t id,ID3D12Resource* 
     const auto cpu=cpuBase(0);
     srvAt(cpu,slot.back.Get(),format);
     srvAt(step(cpu,1),slot.clean.Get(),format);
-    uavAt(step(cpu,2),slot.layer.Get(),kLayerFormat);
-    uavAt(step(cpu,3),nullptr,kMotionFormat);
+    srvAt(step(cpu,2),nullptr,DXGI_FORMAT_R16G16_FLOAT);
+    uavAt(step(cpu,3),slot.layer.Get(),kLayerFormat);
+    uavAt(step(cpu,4),nullptr,kMotionFormat);
+    uavAt(step(cpu,5),nullptr,kMotionFormat);
   }
+  // The scene's motion vectors seed the search where they can be read.
+  const auto sceneFormat=[](DXGI_FORMAT value) {
+    switch(value) {
+      case DXGI_FORMAT_R16G16_TYPELESS: case DXGI_FORMAT_R16G16_FLOAT: return DXGI_FORMAT_R16G16_FLOAT;
+      case DXGI_FORMAT_R32G32_TYPELESS: case DXGI_FORMAT_R32G32_FLOAT: return DXGI_FORMAT_R32G32_FLOAT;
+      case DXGI_FORMAT_R16G16B16A16_TYPELESS: case DXGI_FORMAT_R16G16B16A16_FLOAT: return DXGI_FORMAT_R16G16B16A16_FLOAT;
+      case DXGI_FORMAT_R32G32B32A32_TYPELESS: case DXGI_FORMAT_R32G32B32A32_FLOAT: return DXGI_FORMAT_R32G32B32A32_FLOAT;
+      default: return DXGI_FORMAT_UNKNOWN;
+    }
+  };
+  const DXGI_FORMAT motionView=scene.resource?sceneFormat(scene.resource->GetDesc().Format):DXGI_FORMAT_UNKNOWN;
+  const bool seeded=previous && motionView!=DXGI_FORMAT_UNKNOWN && scene.area.width && scene.area.height
+      && (scene.toPixelsX!=0 || scene.toPixelsY!=0);
   if(previous) {
     const auto cpu=cpuBase(1);
     srvAt(cpu,slot.layer.Get(),kLayerFormat);
     srvAt(step(cpu,1),previous->layer.Get(),kLayerFormat);
-    uavAt(step(cpu,2),nullptr,kLayerFormat);
-    uavAt(step(cpu,3),slot.motion.Get(),kMotionFormat);
+    srvAt(step(cpu,2),seeded?scene.resource:nullptr,seeded?motionView:DXGI_FORMAT_R16G16_FLOAT);
+    uavAt(step(cpu,3),nullptr,kLayerFormat);
+    uavAt(step(cpu,4),slot.motion.Get(),kMotionFormat);
+    uavAt(step(cpu,5),slot.sceneField.Get(),kMotionFormat);
   }
   ID3D12DescriptorHeap* heaps[]={computeHeap.Get()};
   captureList->SetDescriptorHeaps(1,heaps);
   captureList->SetComputeRootSignature(computeRoot.Get());
   const float tolerance=kTolerance, ramp=kRamp;
-  uint32_t constants[5]={width,height,0,0,uint32_t(kSearchRadius)};
+  uint32_t constants[12]={width,height,0,0,uint32_t(kSearchRadius),uint32_t(kSceneRadius),
+      scene.area.x,scene.area.y,scene.area.width,scene.area.height,0,0};
   std::memcpy(&constants[2],&tolerance,4); std::memcpy(&constants[3],&ramp,4);
-  captureList->SetComputeRoot32BitConstants(0,5,constants,0);
+  const float toPixels[2]={seeded?scene.toPixelsX:0.0f,seeded?scene.toPixelsY:0.0f};
+  std::memcpy(&constants[10],toPixels,8);
+  captureList->SetComputeRoot32BitConstants(0,12,constants,0);
   Transition(captureList.Get(),slot.layer.Get(),kReadable,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
   captureList->SetPipelineState(layerPipeline.Get());
   captureList->SetComputeRootDescriptorTable(1,gpuBase(0));
@@ -224,11 +245,16 @@ ID3D12GraphicsCommandList* HudInterpolator::Capture(uint64_t id,ID3D12Resource* 
   Transition(captureList.Get(),slot.layer.Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS,kReadable);
   slot.moving=previous!=nullptr;
   if(previous) {
+    if(seeded) Transition(captureList.Get(),scene.resource,scene.state,kReadable);
     Transition(captureList.Get(),slot.motion.Get(),kReadable,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    Transition(captureList.Get(),slot.sceneField.Get(),kReadable,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     captureList->SetPipelineState(motionPipeline.Get());
     captureList->SetComputeRootDescriptorTable(1,gpuBase(1));
     captureList->Dispatch((blocksX+7)/8,(blocksY+7)/8,1);
     Transition(captureList.Get(),slot.motion.Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS,kReadable);
+    Transition(captureList.Get(),slot.sceneField.Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS,kReadable);
+    if(seeded) Transition(captureList.Get(),scene.resource,kReadable,scene.state);
+    if(seeded) ++counters.sceneSeeded;
   }
   slot.width=width; slot.height=height;
   pendingId=id; // published in SubmitCapture
@@ -272,10 +298,10 @@ bool HudInterpolator::Compose(ID3D12CommandQueue* queue,ID3D12Resource* target,u
   if(SUCCEEDED(hr)) hr=composeList->Reset(composeAllocators[composeSlot].Get(),pipeline.Get());
   if(FAILED(hr)) return Fail(hr);
   const Slot& zero=previous?*previous:*current;
-  auto cpu=srvHeap->GetCPUDescriptorHandleForHeapStart(); cpu.ptr+=SIZE_T(composeSlot)*3*srvSize;
-  auto gpu=srvHeap->GetGPUDescriptorHandleForHeapStart(); gpu.ptr+=UINT64(composeSlot)*3*srvSize;
-  const std::pair<ID3D12Resource*,DXGI_FORMAT> views[3]={{zero.layer.Get(),kLayerFormat},{current->layer.Get(),kLayerFormat},
-      {current->motion.Get(),kMotionFormat}};
+  auto cpu=srvHeap->GetCPUDescriptorHandleForHeapStart(); cpu.ptr+=SIZE_T(composeSlot)*4*srvSize;
+  auto gpu=srvHeap->GetGPUDescriptorHandleForHeapStart(); gpu.ptr+=UINT64(composeSlot)*4*srvSize;
+  const std::pair<ID3D12Resource*,DXGI_FORMAT> views[4]={{zero.layer.Get(),kLayerFormat},{current->layer.Get(),kLayerFormat},
+      {current->motion.Get(),kMotionFormat},{current->sceneField.Get(),kMotionFormat}};
   for(const auto& [resource,viewFormat]:views) {
     D3D12_SHADER_RESOURCE_VIEW_DESC view{}; view.Format=viewFormat; view.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D;
     view.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING; view.Texture2D.MipLevels=1;

@@ -88,6 +88,9 @@ struct Frame {
   // 1.7 (plan E.2): the game's HUD-less color, held back from XeFG while HUD
   // stabilization runs; it tells the mask exactly where HUD is drawn.
   PendingHud heldHudless;
+  // 1.7 (plan I.8): the game's motion vectors, kept for HUD interpolation:
+  // they predict where world-anchored HUD (markers, names) moved.
+  PendingHud heldMotion;
   uint32_t constantIssues{};
   LatencyOutput latencyOutput{LatencyOutput::XeLL};
   xefg_swapchain_frame_constant_data_t data{};

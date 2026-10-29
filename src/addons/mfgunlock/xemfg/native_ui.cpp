@@ -95,8 +95,17 @@ bool CaptureHudInterpolation(Output& o,Frame& frame,uint32_t id) {
   if(a.xefgSwapChainD3D12GetSwapChainPtr(o.fg,IID_PPV_ARGS(&chain))!=0
       || FAILED(chain->GetBuffer(chain->GetCurrentBackBufferIndex(),IID_PPV_ARGS(&backbuffer)))) return false;
   ID3D12Resource* hudless{}; ID3D12Resource* ui{};
+  // Motion vectors: buffer units * scale * size = pixels of the motion
+  // texture (sl_consts.h), so units * scale * back-buffer size = back-buffer
+  // pixels, whatever the render resolution.
+  HudInterpolator::SceneMotion scene{};
+  if(frame.heldMotion.source && frame.constants && frame.valid) {
+    const auto desc=backbuffer->GetDesc();
+    scene={frame.heldMotion.source.Get(),frame.heldMotion.state,frame.heldMotion.region,
+        frame.data.motionVectorScaleX*float(desc.Width),frame.data.motionVectorScaleY*float(desc.Height)};
+  }
   auto* list=o.hudInterp->Capture(id,backbuffer.Get(),D3D12_RESOURCE_STATE_PRESENT,held.source.Get(),held.state,held.region,
-      &hudless,&ui);
+      scene,&hudless,&ui);
   int tags[2]{XEFG_SWAPCHAIN_RESULT_ERROR_INVALID_ARGUMENT,XEFG_SWAPCHAIN_RESULT_ERROR_INVALID_ARGUMENT};
   bool ok=false;
   if(list) {

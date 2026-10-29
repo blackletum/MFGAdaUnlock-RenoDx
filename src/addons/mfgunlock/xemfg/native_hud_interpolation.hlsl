@@ -12,6 +12,7 @@
 Texture2D<float4> Layer0 : register(t0);
 Texture2D<float4> Layer1 : register(t1);
 Texture2D<int2> Motion : register(t2);
+Texture2D<int2> SceneMotion : register(t3); // the scene's motion per block
 SamplerState Linear : register(s0);
 cbuffer Params : register(b0) {
   float phase;   // t in (0, 1): position of this generated frame
@@ -53,6 +54,17 @@ float4 ComposePS(float4 position : SV_Position) : SV_Target {
       const float4 moved = Pair(q, d, score);
       if (score > best) { best = score; result = moved; }
     }
+  }
+  // A world-anchored marker far from its destination block (fast camera
+  // turn) moves with the scene: try the scene's motion here as well.
+  const float2 sceneD = float2(SceneMotion.Load(int3(block, 0)));
+  if (any(sceneD != 0)) {
+    // The scene moves here: HUD that no vector explains is a world-anchored
+    // marker that already left this pixel.
+    nearbyMotion = true;
+    float score;
+    const float4 moved = Pair(q, sceneD, score);
+    if (score > best) { best = score; result = moved; }
   }
   // Moving HUD nearby but no vector explains this pixel: it is where the
   // element was, not where it is at phase t; leave the scene.

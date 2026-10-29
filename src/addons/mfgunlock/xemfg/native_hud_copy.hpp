@@ -18,7 +18,8 @@ class HudCopy {
   bool Initialize(ID3D12Device* device);
   // Records the source region into an owned texture (output format, region
   // size) on `list`, restoring the source state. The copy is left in COMMON.
-  // kind: 0 HUD-less, 1 UI. Returns nullptr on failure.
+  // kind: 0 HUD-less, 1 UI, 2 motion vectors (HUD interpolation). Returns
+  // nullptr on failure.
   ID3D12Resource* Record(ID3D12GraphicsCommandList* list,ID3D12Resource* source,D3D12_RESOURCE_STATES state,
       const DejitterRegion& region,DXGI_FORMAT format,unsigned kind,uint32_t frame);
   // An owned texture for a conversion target (kind, frame slot), created in
@@ -37,7 +38,7 @@ class HudCopy {
   Microsoft::WRL::ComPtr<ID3D12CommandAllocator> allocators[kSlots];
   Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> list;
   Microsoft::WRL::ComPtr<ID3D12Fence> fence;
-  Microsoft::WRL::ComPtr<ID3D12Resource> textures[2][kSlots], targets[2][kSlots];
+  Microsoft::WRL::ComPtr<ID3D12Resource> textures[3][kSlots], targets[2][kSlots];
   bool Ensure(Microsoft::WRL::ComPtr<ID3D12Resource>& texture,DXGI_FORMAT format,uint32_t width,uint32_t height,D3D12_RESOURCE_FLAGS flags);
   HANDLE event{};
   uint64_t fenceValues[kSlots]{}, nextFence{1};

@@ -15,13 +15,19 @@
 // current block to where it was in the previous frame.
 Texture2D<float4> InputA : register(t0);
 Texture2D<float4> InputB : register(t1);
+Texture2D<float2> SceneMotion : register(t2); // the game's motion vectors
 RWTexture2D<float4> LayerOut : register(u0);
 RWTexture2D<int2> MotionOut : register(u1);
+RWTexture2D<int2> SceneOut : register(u2); // the scene's motion per block
 cbuffer Params : register(b0) {
   uint2 size;
   float tolerance;
   float ramp;
-  int radius;
+  int radius;       // search around no motion (HUD fixed on screen)
+  int sceneRadius;  // search around the scene's motion (world-anchored HUD)
+  uint2 sceneBase;  // motion-vector region in SceneMotion
+  uint2 sceneSize;
+  float2 toPixels;  // motion-vector units to back-buffer pixels; 0: no seed
 };
 
 // t0 back buffer, t1 HUD-less, u0 layer.
@@ -48,12 +54,37 @@ void MotionCS(uint3 id : SV_DispatchThreadID) {
   const uint2 blocks = (size + 7) / 8;
   if (any(id.xy >= blocks)) return;
   const int2 origin = int2(id.xy) * 8;
+  // The scene's motion at this block, kept for every block: a world-anchored
+  // marker crossing an empty block at phase t is found through it.
+  int2 seed = int2(0, 0);
+  if (any(toPixels != 0)) {
+    const float2 uv = (float2(origin) + 4) / float2(size);
+    const uint2 texel = sceneBase + min(uint2(uv * float2(sceneSize)), sceneSize - 1);
+    seed = int2(round(SceneMotion.Load(int3(texel, 0)) * toPixels));
+  }
+  SceneOut[id.xy] = seed;
   float present = 0;
   [loop] for (int i = 0; i < 64; i += 3) present = max(present, Fetch(InputA, origin + int2(i & 7, i >> 3)).a);
   if (present <= 0) { MotionOut[id.xy] = int2(0, 0); return; }
 
   float best = 1e30;
   int2 bestOffset = int2(0, 0);
+  // World-anchored HUD (names, health bars, markers) moves with the scene:
+  // the scene's motion at this block predicts the offset, however fast the
+  // camera turns. The vectors point from the current sample to the previous.
+  if (any(toPixels != 0)) {
+    [loop] for (int sy = -sceneRadius; sy <= sceneRadius; sy += 2) {
+      [loop] for (int sx = -sceneRadius; sx <= sceneRadius; sx += 2) {
+        const int2 offset = seed + int2(sx, sy);
+        float sad = 0;
+        [unroll] for (int s = 0; s < 16; ++s) {
+          const int2 q = origin + int2((s & 3) * 2, (s >> 2) * 2);
+          sad += Cost(Fetch(InputA, q), Fetch(InputB, q + offset));
+        }
+        if (sad < best) { best = sad; bestOffset = offset; }
+      }
+    }
+  }
   [loop] for (int y = -radius; y <= radius; y += 4) {
     [loop] for (int x = -radius; x <= radius; x += 4) {
       float sad = 0;

@@ -26,7 +26,7 @@ bool HudCopy::Initialize(ID3D12Device* target) {
 }
 ID3D12Resource* HudCopy::Record(ID3D12GraphicsCommandList* target,ID3D12Resource* source,D3D12_RESOURCE_STATES state,
     const DejitterRegion& region,DXGI_FORMAT format,unsigned kind,uint32_t frame) {
-  if(!target || !source || kind>1 || !region.width || !region.height) { Fail(E_INVALIDARG); return nullptr; }
+  if(!target || !source || kind>2 || !region.width || !region.height) { Fail(E_INVALIDARG); return nullptr; }
   auto& texture=textures[kind][frame%kSlots];
   if(!Ensure(texture,format,region.width,region.height,D3D12_RESOURCE_FLAG_NONE)) return nullptr;
   // The copy rests in COMMON: CopyTextureRegion promotes it implicitly to

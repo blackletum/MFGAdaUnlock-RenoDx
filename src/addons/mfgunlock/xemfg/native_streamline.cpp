@@ -974,7 +974,8 @@ static void WriteSummary(Output& o,const xefg_swapchain_present_status_t& status
     xess_mod::WriteLog("native_hud_summary","\"output\":"+std::to_string(o.diagnosticOutput)
         +",\"captures\":"+std::to_string(hud.captures)+",\"motion_fields\":"+std::to_string(hud.motionFields)
         +",\"composed\":"+std::to_string(hud.composed)+",\"missing\":"+std::to_string(hud.missing)
-        +",\"previous_missing\":"+std::to_string(hud.previousMissing)+",\"active\":"+std::to_string(o.uiInterpolated));
+        +",\"previous_missing\":"+std::to_string(hud.previousMissing)+",\"scene_seeded\":"+std::to_string(hud.sceneSeeded)
+        +",\"active\":"+std::to_string(o.uiInterpolated));
   }
   baseline();
 }

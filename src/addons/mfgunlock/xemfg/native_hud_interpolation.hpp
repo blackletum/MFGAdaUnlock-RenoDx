@@ -30,13 +30,23 @@ class HudInterpolator {
   // semi-transparent ones, is drawn as opaque as in the real frame.
   static constexpr float kRamp=128.0f;
   static constexpr int kSearchRadius=64;
+  // Around the scene's own motion: world-anchored HUD moves with the scene.
+  static constexpr int kSceneRadius=12;
   static bool SupportedFormat(DXGI_FORMAT format);
   bool Initialize(ID3D12Device* device,DXGI_FORMAT format);
   // Source side. `clean` is the game's HUD-less color (region `area`), equal
   // in size to the back buffer. Returns the open list for XeFG's tags, or
   // nullptr; *hudless and *ui receive the textures to tag.
+  // `motion` (optional): the game's motion vectors (region `motionArea`),
+  // two channels, pointing from the current sample to the previous one;
+  // `toPixels` converts their units to back-buffer pixels. They seed the HUD
+  // motion search for world-anchored HUD.
+  struct SceneMotion {
+    ID3D12Resource* resource{}; D3D12_RESOURCE_STATES state{}; DejitterRegion area{};
+    float toPixelsX{}, toPixelsY{};
+  };
   ID3D12GraphicsCommandList* Capture(uint64_t id,ID3D12Resource* backbuffer,D3D12_RESOURCE_STATES backState,
-      ID3D12Resource* clean,D3D12_RESOURCE_STATES cleanState,const DejitterRegion& area,
+      ID3D12Resource* clean,D3D12_RESOURCE_STATES cleanState,const DejitterRegion& area,const SceneMotion& scene,
       ID3D12Resource** hudless,ID3D12Resource** ui);
   bool SubmitCapture(ID3D12CommandQueue* queue);
   // Presentation side: draws the HUD between real frames id-1 and id at
@@ -45,12 +55,12 @@ class HudInterpolator {
   bool Compose(ID3D12CommandQueue* queue,ID3D12Resource* target,uint64_t id,float phase);
   bool Drain(uint32_t timeoutMs);
   HRESULT LastError() const { return error; }
-  struct Counters { uint64_t captures{}, composed{}, missing{}, previousMissing{}, motionFields{}; };
+  struct Counters { uint64_t captures{}, composed{}, missing{}, previousMissing{}, motionFields{}, sceneSeeded{}; };
   Counters Snapshot() const { std::lock_guard guard(lock); return counters; }
   ~HudInterpolator();
  private:
   struct Slot {
-    Microsoft::WRL::ComPtr<ID3D12Resource> back, clean, layer, motion;
+    Microsoft::WRL::ComPtr<ID3D12Resource> back, clean, layer, motion, sceneField;
     uint64_t id{UINT64_MAX}, captured{}, lastUse{};
     uint32_t width{}, height{};
     bool moving{};
