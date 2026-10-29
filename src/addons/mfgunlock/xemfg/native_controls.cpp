@@ -195,7 +195,7 @@ void DrawControls(PanelPage page) {
       status.cudaState==1?"NVIDIA acceleration ready":"Compatibility shaders";
   constexpr const char* flipHelp="Uses the NVIDIA driver to space generated frames evenly. Leave enabled for driver pacing when available; otherwise XeFG uses its own pacing. Changes apply at the next frame group. Active reports driver acceptance, not a monitor scanout measurement.";
   constexpr const char* compositionHelp="Off by default: XeFG interpolates the HUD with the image. Enable only if HUD interpolation causes artifacts. Composition needs HUD-less color from the game and updates the HUD at the real frame rate, so moving HUD elements may look less smooth. Changes apply at the next source frame.";
-  constexpr const char* stabilizationHelp="Experimental, off by default. For games that do not provide HUD-less color: pixels that stay unchanged for a few real frames (static HUD text, icons and the minimap frame) are composed from the newest real frame over every generated frame instead of being interpolated, which removes their flicker. Moving or semi-transparent HUD elements are still interpolated. Costs one copy and one small compute pass per real frame. Not used when the game provides HUD-less color; turn on UI Composition there.";
+  constexpr const char* stabilizationHelp="Experimental, off by default. For games that do not provide HUD-less color: pixels that stay unchanged for a few real frames (static HUD text, icons and the minimap frame) are composed from the newest real frame over every generated frame instead of being interpolated, which removes their flicker. Moving or semi-transparent HUD elements are still interpolated. Costs one copy and one small compute pass per real frame. Also works in games that provide HUD-less color, as an alternative to UI Composition: UI Composition updates the whole HUD at the real frame rate, while this keeps moving HUD interpolated at the output rate. When on, it replaces UI Composition.";
   const char* composition=!status.uiCompositionKnown?"Waiting for frame status":status.uiStabilized?"HUD stabilization (static HUD composed)":status.uiCompositionApplied?"UI composition":
       value.uiComposition && !status.uiCompositionAvailable?"Waiting for HUD-less input":
       value.uiComposition?"Change pending":value.uiStabilization && !status.uiCompositionAvailable?"Waiting for HUD stabilization":"UI interpolation (default)";
@@ -280,9 +280,7 @@ void DrawControls(PanelPage page) {
       ImGui::EndDisabled();
     });
     ui::Setting("##xe_stabilization_row","HUD stabilization (experimental)",stabilizationHelp,[&] {
-      ImGui::BeginDisabled(status.uiCompositionAvailable && !value.uiStabilization);
       if(ImGui::Checkbox("##xe_ui_stabilization",&value.uiStabilization)) ConfigureControls(value);
-      ImGui::EndDisabled();
     });
     ui::Readout("##xe_composition_state","HUD handling",composition,compositionHelp);
     // 1.5.7: what the game provides, per kind: received, converted, filtered or absent.

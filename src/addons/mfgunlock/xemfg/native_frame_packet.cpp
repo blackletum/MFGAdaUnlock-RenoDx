@@ -153,6 +153,18 @@ void SubmitResource(Output& o,Frame& frame,uint32_t id,const Resource& t) {
     receipt.accepted=false;receipt.rejection="removed";
     frame.resources&=~bit; return;
   }
+  // 1.7 (plan E.2): HUD stabilization supplies its own HUD-less and UI
+  // inputs at the source Present, so the static HUD stays put while moving
+  // HUD is still interpolated at the output rate. XeFG keeps only the first
+  // tag of a type per frame, so the game's own HUD tags are held back here.
+  if(optional && ControlsSettings().uiStabilization) {
+    receipt.accepted=false; receipt.rejection="hud_stabilization";
+    static std::atomic<uint32_t> heldLogBudget{};
+    if(heldLogBudget.fetch_add(1)<2)
+      xess_mod::WriteLog("native_hud_held","\"id\":"+std::to_string(id)+",\"type\":"+std::to_string(type)
+          +",\"reason\":\"hud_stabilization\"");
+    return;
+  }
   if(!t.headerValid || t.state==UINT_MAX) { reject(HudMetadata); return; }
   ComPtr<ID3D12Resource> resource;
   if(!single_overlay::native::Unwrap(t.native,resource)) {
