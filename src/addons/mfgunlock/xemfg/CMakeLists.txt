@@ -600,3 +600,32 @@ foreach(target IN ITEMS xemfg_latency_tests xemfg_ui_tests xemfg_panel_preview)
   target_sources(${target} PRIVATE ${XEMFG_GPU_PASS_SOURCES})
   target_include_directories(${target} PRIVATE "${XEMFG_SHADER_HEADERS}")
 endforeach()
+
+# 1.7 (plan F): the xvk D3D12-on-Vulkan layer (vendor/xvk, from dashdogy's MFG
+# Unlocker v1.7.0, MIT) for XeMFG on Vulkan games. Built only when the Khronos
+# Vulkan headers and the locally extracted SPIR-V program set exist
+# (tools/extract_xvk_programs.py): the SPIR-V derives from Intel's DXIL and is
+# never committed.
+set(XEMFG_VULKAN_HEADERS "${CMAKE_SOURCE_DIR}/../../../deps/vulkan-headers/include" CACHE PATH
+  "Khronos Vulkan-Headers include directory (1.3 or later)")
+set(XEMFG_XVK_PROGRAMS "${CMAKE_SOURCE_DIR}/../../../deps/xvk-programs" CACHE PATH
+  "Folder written by tools/extract_xvk_programs.py")
+if(EXISTS "${XEMFG_VULKAN_HEADERS}/vulkan/vulkan.h" AND EXISTS "${XEMFG_XVK_PROGRAMS}/programs.json")
+  find_package(Python3 COMPONENTS Interpreter REQUIRED)
+  set(XEMFG_XVK_GENERATED "${CMAKE_CURRENT_BINARY_DIR}/xvk")
+  add_custom_command(OUTPUT "${XEMFG_XVK_GENERATED}/embedded_xvk_programs.generated.h" "${XEMFG_XVK_GENERATED}/embedded_xvk_programs.rc"
+    COMMAND "${Python3_EXECUTABLE}" -I "${CMAKE_CURRENT_SOURCE_DIR}/../../../../tools/generate_xvk_programs.py"
+      "${XEMFG_XVK_PROGRAMS}" "${XEMFG_XVK_GENERATED}"
+    DEPENDS "${XEMFG_XVK_PROGRAMS}/programs.json" "${XEMFG_XVK_PROGRAMS}/SHA256SUMS.txt"
+      "${CMAKE_CURRENT_SOURCE_DIR}/../../../../tools/generate_xvk_programs.py" VERBATIM)
+  file(GLOB XEMFG_XVK_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/vendor/xvk/*.cpp")
+  add_library(xemfg_xvk STATIC ${XEMFG_XVK_SOURCES} "${XEMFG_XVK_GENERATED}/embedded_xvk_programs.generated.h")
+  target_include_directories(xemfg_xvk PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/vendor/xvk" "${XEMFG_XVK_GENERATED}"
+    "${XEMFG_VULKAN_HEADERS}")
+  target_compile_definitions(xemfg_xvk PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN)
+  target_compile_options(xemfg_xvk PRIVATE /utf-8 /bigobj)
+  set_target_properties(xemfg_xvk PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON
+    MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+  target_link_libraries(xemfg_xvk PUBLIC d3d12 dxgi bcrypt)
+  set(XEMFG_XVK_AVAILABLE ON)
+endif()
