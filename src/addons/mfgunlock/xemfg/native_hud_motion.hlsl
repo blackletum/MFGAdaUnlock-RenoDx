@@ -118,6 +118,9 @@ void MotionCS(uint3 id : SV_DispatchThreadID) {
     zero += Cost(Fetch(InputA, q), Fetch(InputB, q));
   }
   // Prefer no motion unless the match is clearly better (static HUD whose
-  // semi-transparent pixels change with the scene behind them).
-  MotionOut[id.xy] = zero <= refined * 1.25 + 0.5 ? int2(0, 0) : refinedOffset;
+  // semi-transparent pixels change with the scene behind them) and good in
+  // itself: a minimap or text block that merely resembles another spot must
+  // not get a vector. Cost per pixel is at most 5.
+  const bool confident = refined * 2 + 1 < zero && refined < 64 * 0.25;
+  MotionOut[id.xy] = confident ? refinedOffset : int2(0, 0);
 }

@@ -31,43 +31,47 @@ float4 Pair(float2 q, float2 d, out float score) {
   score = l0.a * l1.a;
   return lerp(l0, l1, phase);
 }
+// The current frame's block at `p` was matched with displacement `d`.
+bool MatchedAt(float2 p, float2 d) {
+  return all(abs(float2(Motion.Load(int3(int2(floor(p)) >> 3, 0))) - d) <= 2);
+}
 float4 ComposePS(float4 position : SV_Position) : SV_Target {
   const float2 q = position.xy;
   if (valid0 <= 0) return Layer1.SampleLevel(Linear, q * inverseSize, 0);
-  float zeroScore;
-  const float4 still = Pair(q, 0, zeroScore);
+  const float4 l0 = Layer0.SampleLevel(Linear, q * inverseSize, 0);
+  const float4 l1 = Layer1.SampleLevel(Linear, q * inverseSize, 0);
+  const float4 still = lerp(l0, l1, phase);
   if (moving <= 0) return still;
-  // A block's vector exists only where its HUD is in the current frame, so a
-  // pixel the HUD crosses at phase t may sit in a block without one. Try the
-  // vectors of the 3x3 neighbouring blocks and keep the one both frames agree
-  // on; no motion wins ties.
+  // Candidates: the vectors of the 3x3 neighbouring blocks (a pixel the HUD
+  // crosses at phase t may sit in a block without one) and the scene's motion
+  // here (a world-anchored marker far from its destination block). A
+  // candidate d is only used where the block the element comes from in the
+  // current frame, q - (1-t)*d, was matched with d itself: screen-fixed HUD
+  // (matched with no motion) is never dragged along with the scene, and two
+  // unrelated HUD elements that happen to line up are not joined.
   const int2 block = int2(q) >> 3;
-  float best = zeroScore + 0.05;
+  float best = l0.a * l1.a + 0.05;
   float4 result = still;
-  bool nearbyMotion = false;
-  [unroll] for (int y = -1; y <= 1; ++y) {
-    [unroll] for (int x = -1; x <= 1; ++x) {
-      const float2 d = float2(Motion.Load(int3(block + int2(x, y), 0)));
-      if (all(d == 0)) continue;
-      nearbyMotion = true;
-      float score;
-      const float4 moved = Pair(q, d, score);
-      if (score > best) { best = score; result = moved; }
-    }
-  }
-  // A world-anchored marker far from its destination block (fast camera
-  // turn) moves with the scene: try the scene's motion here as well.
-  const float2 sceneD = float2(SceneMotion.Load(int3(block, 0)));
-  if (any(sceneD != 0)) {
-    // The scene moves here: HUD that no vector explains is a world-anchored
-    // marker that already left this pixel.
-    nearbyMotion = true;
+  bool moved = false, left = false;
+  float2 candidates[10];
+  [unroll] for (int k = 0; k < 9; ++k)
+    candidates[k] = float2(Motion.Load(int3(block + int2(k % 3 - 1, k / 3 - 1), 0)));
+  candidates[9] = float2(SceneMotion.Load(int3(block, 0)));
+  [unroll] for (int c = 0; c < 10; ++c) {
+    const float2 d = candidates[c];
+    if (all(d == 0)) continue;
+    // The previous frame's HUD at q left: the current block it moved to,
+    // q - d, was matched with d.
+    if (l0.a > 0 && MatchedAt(q - d, d)) left = true;
+    if (!MatchedAt(q - (1 - phase) * d, d)) continue;
     float score;
-    const float4 moved = Pair(q, sceneD, score);
-    if (score > best) { best = score; result = moved; }
+    const float4 pair = Pair(q, d, score);
+    if (score > best) { best = score; result = pair; moved = true; }
   }
-  // Moving HUD nearby but no vector explains this pixel: it is where the
-  // element was, not where it is at phase t; leave the scene.
-  if (nearbyMotion && best < 0.25) return 0;
-  return result;
+  if (moved) return result;
+  // Nothing moves through q at phase t. Drop what is only a trail: HUD of the
+  // previous frame that left q, and HUD of the current frame whose block is
+  // matched with motion (it has not arrived yet).
+  const bool arriving = l1.a > 0 && any(float2(Motion.Load(int3(block, 0))) != 0);
+  return lerp(left ? 0 : l0, arriving ? 0 : l1, phase);
 }

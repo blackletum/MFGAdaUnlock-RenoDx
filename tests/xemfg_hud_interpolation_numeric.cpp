@@ -191,11 +191,30 @@ int main() {
       for(unsigned x:{20u,25u,121u,126u}) Require(turned[size_t(y)*kWidth+x]==scene[0],"fast world-anchored HUD left a trail");
     }
 
+    // Screen-fixed HUD while the camera turns: text-like stripes (period 10
+    // px) that do not move, with the scene moving -29 px, which lines the
+    // stripes up with other stripes. Nothing may be dragged along: the HUD stays
+    // exactly where it is and the empty pixels between stripes stay scene.
+    const std::vector<uint32_t> turning(scene.size(),0x0000CF40u); // half(-29), half(0)
+    auto turnField=gpu.Texture(turning,kWidth,kHeight,false,DXGI_FORMAT_R16G16_FLOAT);
+    const HudInterpolator::SceneMotion turn{turnField.Get(),D3D12_RESOURCE_STATE_PRESENT,{0,0,kWidth,kHeight},1.0f,1.0f};
+    const auto stripes=[](unsigned x,unsigned y) { return x>=40 && x<160 && y>=4 && y<20 && x%10<5; };
+    CaptureFrame(gpu,hud,40,0,stripes,color,turn);
+    CaptureFrame(gpu,hud,41,1,stripes,color,turn);
+    for(const float t:{0.25f,0.5f,0.75f}) {
+      auto fixed=gpu.Texture(scene,kWidth,kHeight,true);
+      Require(hud.Compose(gpu.queue.Get(),fixed.Get(),41,t),"compose fixed");
+      gpu.Flush();
+      const auto still=gpu.Read(fixed.Get());
+      for(unsigned y=0;y<kHeight;++y) for(unsigned x=0;x<kWidth;++x)
+        Require(still[size_t(y)*kWidth+x]==(stripes(x,y)?color:scene[0]),"screen-fixed HUD dragged by the scene's motion");
+    }
+
     // An id that was never captured: the generated frame is left as is.
     auto untouched=gpu.Texture(scene,kWidth,kHeight,true);
     Require(!hud.Compose(gpu.queue.Get(),untouched.Get(),99,0.5f),"unknown frame composed");
     Require(gpu.Read(untouched.Get())==scene,"unknown frame changed the output");
-    std::printf("PASS: static HUD cross-faded (max error %.4f), moving HUD drawn halfway without a trail, 100 px world-anchored HUD followed via scene motion, unknown frame untouched\n",worst);
+    std::printf("PASS: static HUD cross-faded (max error %.4f), moving HUD drawn halfway without a trail, 100 px world-anchored HUD followed via scene motion, screen-fixed HUD kept while the scene turns, unknown frame untouched\n",worst);
     return 0;
   } catch(const std::exception& e) { std::fprintf(stderr,"%s\n",e.what()); return 1; }
 }
