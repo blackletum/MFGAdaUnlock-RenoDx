@@ -25,6 +25,14 @@ RT_RCDATA = 10
 FIRST_RESOURCE_ID = 7400
 # The release DLL this tool was written against (v1.7.0, SHA256SUMS.txt).
 KNOWN_DLL_SHA256 = "e6b6e6b70a6ed3af839c9647a32fc22660ae6b2d655062c5c072246c91fc10c7"
+# The Vulkan host's own input-copy shader (vk_input_copy.comp, dashdogy's MIT
+# GLSL): its three variants as his generate_vk_input_shaders.py pins them. They
+# are compiled into the DLL's .rdata; taken from there (no glslang 1.2.176.1).
+INPUT_COPY_SHA256 = (
+    "f6f48f06d01134d9596b117e0c98b4a1a098325ab5b67268eedee8554955b7ca",
+    "112a67e0df42b09edab40be77f505d58f5b2d3b357bda64a45f145fb247ce0d3",
+    "2e34c018e32f1a5fd819e93e2e46cf31c454312c8d3f53ae22d491d2e1470fbc",
+)
 
 
 def pe_sections(data):
@@ -180,6 +188,25 @@ def reflect(spv):
     return bindings, (push + 3) & ~3
 
 
+def input_copy_modules(data):
+    """The pinned input-copy SPIR-V modules, walked instruction by instruction."""
+    found = {}
+    for m in re.finditer(re.escape(struct.pack("<I", 0x07230203)), data):
+        at, end = m.start(), m.start() + 20
+        while end + 4 <= len(data) and end - at < 65536:
+            count = struct.unpack_from("<I", data, end)[0] >> 16
+            if not count:
+                break
+            end += 4 * count
+            digest = hashlib.sha256(data[at:end]).hexdigest()
+            if digest in INPUT_COPY_SHA256:
+                found[INPUT_COPY_SHA256.index(digest)] = data[at:end]
+                break
+    if len(found) != len(INPUT_COPY_SHA256):
+        raise SystemExit("input-copy shader variants not found")
+    return [found[i] for i in range(len(INPUT_COPY_SHA256))]
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("dll", type=Path)
@@ -234,6 +261,8 @@ def main():
         name = p["dxil_sha256"] + ".spv"
         (args.output / name).write_bytes(spirv[p["resource"]])
         sums.append(f"{p['spv_sha256']}  {name}")
+    for variant, module in enumerate(input_copy_modules(data)):
+        (args.output / f"vk_input_copy_{variant}.spv").write_bytes(module)
     (args.output / "programs.json").write_text(json.dumps(programs, indent=1) + "\n", encoding="utf-8")
     (args.output / "SHA256SUMS.txt").write_text("\n".join(sums) + "\n", encoding="ascii")
     print(f"extracted {len(programs)} xvk SPIR-V programs")

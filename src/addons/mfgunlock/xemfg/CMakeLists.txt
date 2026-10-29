@@ -577,9 +577,12 @@ if(EXISTS "${XEMFG_VULKAN_HEADERS}/vulkan/vulkan.h" AND EXISTS "${XEMFG_XVK_PROG
   find_package(Python3 COMPONENTS Interpreter REQUIRED)
   set(XEMFG_XVK_GENERATED "${CMAKE_CURRENT_BINARY_DIR}/xvk")
   add_custom_command(OUTPUT "${XEMFG_XVK_GENERATED}/embedded_xvk_programs.generated.h" "${XEMFG_XVK_GENERATED}/embedded_xvk_programs.rc"
+      "${XEMFG_XVK_GENERATED}/vk_input_copy_spv.h"
     COMMAND "${Python3_EXECUTABLE}" -I "${CMAKE_CURRENT_SOURCE_DIR}/../../../../tools/generate_xvk_programs.py"
       "${XEMFG_XVK_PROGRAMS}" "${XEMFG_XVK_GENERATED}"
     DEPENDS "${XEMFG_XVK_PROGRAMS}/programs.json" "${XEMFG_XVK_PROGRAMS}/SHA256SUMS.txt"
+      "${XEMFG_XVK_PROGRAMS}/vk_input_copy_0.spv" "${XEMFG_XVK_PROGRAMS}/vk_input_copy_1.spv"
+      "${XEMFG_XVK_PROGRAMS}/vk_input_copy_2.spv"
       "${CMAKE_CURRENT_SOURCE_DIR}/../../../../tools/generate_xvk_programs.py" VERBATIM)
   file(GLOB XEMFG_XVK_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/vendor/xvk/*.cpp")
   add_library(xemfg_xvk STATIC ${XEMFG_XVK_SOURCES} "${XEMFG_XVK_GENERATED}/embedded_xvk_programs.generated.h")
@@ -591,4 +594,12 @@ if(EXISTS "${XEMFG_VULKAN_HEADERS}/vulkan/vulkan.h" AND EXISTS "${XEMFG_XVK_PROG
     MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
   target_link_libraries(xemfg_xvk PUBLIC d3d12 dxgi bcrypt)
   set(XEMFG_XVK_AVAILABLE ON)
+  # The Vulkan host (vendor/xvkhost, same release) and the addon's vulkan-1 and
+  # NGX Vulkan hooks (native_vulkan.cpp). The program set is embedded as RCDATA
+  # 7400+ in the addon itself (vk_host passes its own module to xvk).
+  target_sources(mfgunlock_native_xemfg PRIVATE vendor/xvkhost/vk_host.cpp native_vulkan.cpp
+    "${XEMFG_XVK_GENERATED}/vk_input_copy_spv.h" "${XEMFG_XVK_GENERATED}/embedded_xvk_programs.rc")
+  target_include_directories(mfgunlock_native_xemfg PRIVATE vendor/xvkhost)
+  target_compile_definitions(mfgunlock_native_xemfg PRIVATE MFGUNLOCK_XEMFG_VULKAN)
+  target_link_libraries(mfgunlock_native_xemfg PRIVATE xemfg_xvk)
 endif()

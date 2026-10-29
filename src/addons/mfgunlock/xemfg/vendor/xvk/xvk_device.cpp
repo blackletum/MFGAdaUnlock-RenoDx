@@ -142,6 +142,8 @@ HRESULT Device::Init(const DeviceDesc& desc)
 #undef XVK_LOAD_LATENCY
     if (!complete) return E_FAIL;
     presentIds_ = desc.presentIds;
+    presentMetering_ = desc.presentMetering;   // MFGAdaUnlock 1.7
+    Log("present metering %d", int(presentMetering_));
     Log("low latency: Reflex functions %d, out-of-band queues %d, present ids %d, Anti-Lag 2 %d", int(lowLatency2()),
         int(vk_.vkQueueNotifyOutOfBandNV != nullptr), int(presentIds_), int(vk_.vkAntiLagUpdateAMD != nullptr));
 

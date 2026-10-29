@@ -353,10 +353,10 @@ runtime version.
 |---|---|---|
 | GPU | GeForce RTX 40-series | GeForce RTX 20/30/40/50 |
 | Frame generation | NVIDIA DLSS-G, unlocked to 3x–6x on Ada | Intel XeSS-FG with a multi-frame model, 2x–6x |
-| Game requirement | DLSS frame generation through Streamline | DLSS-G inputs through Streamline, the game's own XeSS-FG, or FSR 3.1 frame generation |
+| Game requirement | DLSS frame generation through Streamline | DLSS-G inputs through Streamline, the game's own XeSS-FG, or FSR 3.1 frame generation (D3D12); DLSS Super Resolution or Ray Reconstruction (Vulkan) |
 | Latency | NVIDIA Reflex | Intel XeLL |
 | Extra files | A modern `nvngx_dlssg.dll` | Intel `libxess_fg.dll` + `libxell.dll`, installed from the panel |
-| Graphics API | D3D12 (Vulkan experimental) | D3D12 |
+| Graphics API | D3D12 (Vulkan experimental) | D3D12, Vulkan (experimental, 1.7) |
 
 Both backends are in the same `renodx-mfgunlock.addon64`. A new installation
 uses **DLSS-G**. Select the backend in the panel under **General → Frame
@@ -510,6 +510,8 @@ users never need to edit it.
 | `[XeFG] XeFGFlipMetering` | `auto` | NVIDIA driver flip metering for generated frames; can also be toggled live in the panel |
 | `[XeFG] ForceVSyncOff` | `0` | `1` presents the game's frames with sync interval 0, as with VSync off in the game, for games that offer no VSync option (Elden Ring). Game VSync keeps flip metering and generated-frame pacing from applying; the panel warns when that happens. Also in the panel as **Force game VSync off** |
 | `[Latency] Input` / `Output` | `Auto` | Latency route. XeMFG always uses XeLL for output; Reflex input from the game is translated to XeLL |
+| `[XeFG] Vulkan` | `1` | Experimental. XeMFG on Vulkan games: Intel's own XeFG/XeLL run on the game's Vulkan device through a D3D12-on-Vulkan layer (from dashdogy's MFG Unlocker 1.7.0). Inputs come from the game's DLSS Super Resolution or Ray Reconstruction, so turn DLSS on; the game's frame generation switch turns XeMFG on and off. `0` leaves Vulkan games untouched. Restart required |
+| `[XeFG] VulkanPresentMetering` | `1` | NVIDIA present metering (`VK_NV_present_metering`, the Vulkan form of flip metering) for XeMFG's Vulkan output, where the driver offers it; not used with VSync on. `0` paces with XeLL and the CPU pacer only |
 | `[XeFG] InvertedDepth` / `JitteredMotion` | not set | Manual convention overrides for unusual games. Normally learned automatically (see below) |
 | `[Adapters] FidelityFX` | `1` | `0` stops XeMFG from taking over FSR 3.1 frame generation |
 | `[Adapters] DlssSr` | `0` | `1` enables the experimental DLSS-SR input (see below) |

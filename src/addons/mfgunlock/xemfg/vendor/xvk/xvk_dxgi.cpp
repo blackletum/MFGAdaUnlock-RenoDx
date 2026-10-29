@@ -44,6 +44,7 @@ std::map<HWND, std::shared_ptr<Surface>> gRegistered;   // the game's surfaces (
 std::shared_mutex gLatencyLock;
 ReflexMode gReflex;
 std::atomic<bool> gReflexOn{false};
+std::atomic<uint32_t> gMeteringBatch{0};   // MFGAdaUnlock 1.7: SetPresentMeteringBatch
 
 void ApplySleepMode(Device* device, VkSwapchainKHR chain, const ReflexMode& mode)
 {
@@ -389,6 +390,8 @@ private:
     static constexpr uint64_t kLatencyAfterPresents = 240;
     bool latencyMode_ = false;
     uint64_t lastPresentId_ = 0;
+    uint32_t meteringFrame_ = 0;   // MFGAdaUnlock 1.7: the base frame of the batch metering last opened
+    uint32_t meteringSent_ = 0;    // and the batch size the driver was last given (1: metering off)
     uint32_t loggedFrames_ = 0;
     std::atomic<uint64_t> shownPresents_{0};
     bool latencyUpgraded_ = false;
@@ -757,6 +760,23 @@ void SwapChain::PresentThread()
                 if (marked && !item.generated && device_->presentIds() && item.frame > lastPresentId_) {
                     presentId = lastPresentId_ = item.frame;
                     present.pNext = &ids;
+                }
+                // MFGAdaUnlock 1.7: the driver's present metering. A batch is the outputs of one base frame (the low 32 bits
+                // of XeFG's frame id are the host's frame); its first present names the batch size, and a batch of 1
+                // turns the metering off once generation stops.
+                VkSetPresentConfigNV metering{VK_STRUCTURE_TYPE_SET_PRESENT_CONFIG_NV, nullptr, 0, 0};
+                if (device_->presentMetering() && item.frame) {
+                    const uint32_t batch = gMeteringBatch.load(std::memory_order_relaxed);
+                    const uint32_t base = uint32_t(item.frame);
+                    const uint32_t wanted = batch >= 2 ? batch : 1;
+                    if (base != meteringFrame_ && (wanted >= 2 || meteringSent_ >= 2)) {
+                        metering.numFramesPerBatch = wanted;
+                        metering.pNext = present.pNext;
+                        present.pNext = &metering;
+                        if (wanted != meteringSent_) Log("present metering: %u frames per batch", wanted);
+                        meteringSent_ = wanted;
+                    }
+                    meteringFrame_ = base;
                 }
                 VkSetLatencyMarkerInfoNV marker{VK_STRUCTURE_TYPE_SET_LATENCY_MARKER_INFO_NV, nullptr, item.frame,
                                                 VK_LATENCY_MARKER_OUT_OF_BAND_PRESENT_START_NV};
@@ -1261,6 +1281,11 @@ bool SurfaceBroken(HWND window) noexcept
 }
 
 // ---------------------------------------------------------------- vkreflex.1: the host's low-latency outputs
+void SetPresentMeteringBatch(uint32_t frames) noexcept
+{
+    gMeteringBatch.store(frames, std::memory_order_relaxed);
+}
+
 void SetOutputFrame(uint64_t frame, bool generated) noexcept
 {
     tOutputFrame = frame;

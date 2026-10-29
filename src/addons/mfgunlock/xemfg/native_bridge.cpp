@@ -16,6 +16,9 @@
 #include <deps/imgui/imgui.h>
 #include <reshade.hpp>
 #include <set>
+#ifdef MFGUNLOCK_XEMFG_VULKAN
+#include "native_vulkan.hpp"
+#endif
 
 namespace mfgunlock::xemfg::native {
 // Intel excludes CreateContext, Init and Destroy from its thread-safe API
@@ -333,6 +336,10 @@ static HRESULT STDMETHODCALLTYPE FactoryHook(IDXGIFactory2* f,IUnknown* d,HWND w
     IDXGIOutput* restrictOutput,IDXGISwapChain1** out) {
   // Plan 5.2: the game's own XeFG creating its swapchain; never stack a second Intel output.
   if(GameOwnsFrameGeneration()) return originalFactory(f,d,w,desc,full,restrictOutput,out);
+#ifdef MFGUNLOCK_XEMFG_VULKAN
+  // 1.7 (plan F): a Vulkan game's DXGI chains are the driver's presentation.
+  if(vulkan::GameUsesVulkan()) return originalFactory(f,d,w,desc,full,restrictOutput,out);
+#endif
   if(internalCreate) {
     const auto hr=originalFactory(f,d,w,desc,full,restrictOutput,out);
     if(SUCCEEDED(hr) && creatingWindow==w) WrapFinalOutput(d,w,out);
@@ -351,6 +358,9 @@ static HRESULT STDMETHODCALLTYPE FactoryHook(IDXGIFactory2* f,IUnknown* d,HWND w
 static HRESULT STDMETHODCALLTYPE LegacyFactoryHook(IDXGIFactory* factory,IUnknown* source,
     DXGI_SWAP_CHAIN_DESC* desc,IDXGISwapChain** out) {
   if(GameOwnsFrameGeneration()) return originalLegacyFactory(factory,source,desc,out);
+#ifdef MFGUNLOCK_XEMFG_VULKAN
+  if(vulkan::GameUsesVulkan()) return originalLegacyFactory(factory,source,desc,out);
+#endif
   if(internalCreate) {
     const auto hr=originalLegacyFactory(factory,source,desc,out);
     // Intel normally creates its native output through ForHwnd. Keep final
@@ -418,7 +428,13 @@ bool Install() {
 }
 static bool forceDred{},debugLayer{};
 bool D3D12DiagnosticsForced() { return forceDred || debugLayer; }
-static bool CreateDeviceEvent(reshade::api::device_api api,uint32_t&) {
+static bool CreateDeviceEvent(reshade::api::device_api api,uint32_t& version) {
+#ifdef MFGUNLOCK_XEMFG_VULKAN
+  // 1.7 (plan F): vkCreateInstance; the Vulkan host's hooks go in before the device.
+  if(api==reshade::api::device_api::vulkan) return vulkan::BeforeInstance(version);
+#else
+  (void)version;
+#endif
   if(api!=reshade::api::device_api::d3d12 || !D3D12DiagnosticsForced()) return false;
   // Must run before D3D12CreateDevice; both settings apply to later devices only.
   HRESULT dred=E_ABORT,layer=E_ABORT;
@@ -539,6 +555,9 @@ void Attach(HMODULE module) {
   s.summaryIntervalMs=std::clamp(GetPrivateProfileIntW(L"Diagnostics",L"SummaryIntervalMs",10000,ini.c_str()),100u,600000u);
   forceDred=GetPrivateProfileIntW(L"Diagnostics",L"ForceDRED",0,ini.c_str())!=0;
   debugLayer=GetPrivateProfileIntW(L"Diagnostics",L"D3D12DebugLayer",0,ini.c_str())!=0;  AttachModel(module);
+#ifdef MFGUNLOCK_XEMFG_VULKAN
+  vulkan::InstallDiagnostics();
+#endif
   reshade::register_event<reshade::addon_event::create_device>(&CreateDeviceEvent);
   reshade::register_event<reshade::addon_event::init_device>(&DeviceEvent);
   reshade::register_event<reshade::addon_event::present>(&OutputPresent);

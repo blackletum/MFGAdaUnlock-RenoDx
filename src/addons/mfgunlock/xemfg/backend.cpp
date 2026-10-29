@@ -21,6 +21,9 @@
 #ifdef MFGUNLOCK_NATIVE_XEMFG
 #include "native_profiles.hpp"
 #endif
+#ifdef MFGUNLOCK_XEMFG_VULKAN
+#include "native_vulkan.hpp"
+#endif
 #include <intrin.h>
 #include <map>
 #include <memory>
@@ -317,7 +320,7 @@ __declspec(noinline) Result Create(ID3D12Device* device, Handle* output) {
   const bool first=!s.attempted && s.nativeContexts.empty();
   Prepare(device);
   if(first && s.model) xess_mod::WriteLog("model_prepared_before_create","\"owner\":\""+std::string(hostCall?"host":"game")+"\",\"caller\":\""+escape(CallerName(caller))+"\"");
-  if(hostCall && s.model) {
+  if(hostCall && s.model && !xess_mod::VulkanHostDevice(device)) {
     // Bind the optional GPU route to the actual output device, not an earlier
     // game capability probe. Other devices retain the profiled DXIL path.
     xefg_cuda::SetLog(&xess_mod::WriteLog);
@@ -350,8 +353,16 @@ template<class Init> Result Initialize(Handle handle, Init call) {
   if (c.initialized) sdk_pacing::Unregister(handle,c.generation);
   c.initialized=false;
   std::string failure;
-  ConfigureFlip();
-  ConfigureFlipQueue();
+  if(xess_mod::VulkanHostDevice(c.device.Get())) {
+    // 1.7 (plan F): the xvk device has no DXGI queue for NVAPI's flip
+    // configuration or the flip queue; XeLL and the CPU pacer space the outputs.
+    sdk_pacing::SetFlipMetering(nullptr,false,0);
+    sdk_pacing::SetFlipQueue(false,50);
+    xess_mod::WriteLog("flip_metering_unavailable","\"fallback\":\"SDK_extra_pacing\",\"reason\":\"vulkan_host\"");
+  } else {
+    ConfigureFlip();
+    ConfigureFlipQueue();
+  }
   if (!sdk_pacing::Install(fg,failure) || !sdk_pacing::Register(handle,c.generation,c.device.Get(),failure)) {
     Detail("XeMFG disabled: extra-output pacing unavailable: "+failure);
     original_xefgSwapChainSetEnabled(handle,0);
@@ -709,7 +720,25 @@ DWORD WINAPI StartupWorker(void* reference) {
 } // namespace
 
 namespace xess_mod {
+namespace { std::atomic<ID3D12Device*> vulkanHostDevice{}; }
 HMODULE Self() noexcept { return self; }
+bool ActiveSdkPair(HMODULE& outFg,HMODULE& outLl) noexcept {
+  CompleteStartup();
+  std::lock_guard lock(mutex);
+  if(!Get().status.hooks || !fg || !ll) return false;
+  outFg=fg; outLl=ll; return true;
+}
+bool AdoptVulkanHostPair(HMODULE hostFg,HMODULE hostLl) noexcept {
+  std::lock_guard lock(mutex);
+  return Get().status.hooks && hostFg && hostFg==fg && hostLl==ll;
+}
+bool HostRedirectedExport(HMODULE module,const char* name) noexcept {
+  return module && name && HostRedirect(reinterpret_cast<const void*>(GetProcAddress(module,name)));
+}
+void SetVulkanHostDevice(ID3D12Device* device) noexcept { vulkanHostDevice.store(device,std::memory_order_release); }
+bool VulkanHostDevice(const ID3D12Device* device) noexcept {
+  return device && device==vulkanHostDevice.load(std::memory_order_acquire);
+}
 void WriteLog(const char* stage,const std::string& fields) noexcept {
   try { LogQueue().Push(GetTickCount64(),GetCurrentProcessId(),stage,fields); } catch(...) {}
 }
@@ -768,7 +797,12 @@ bool RuntimeFilesRejected(RuntimeFileReport (&out)[2]) noexcept {
   if(!runtimeFilesRejected) return false;
   out[0]=runtimeFiles[0]; out[1]=runtimeFiles[1]; return true;
 }
-void SetGameMultiplier(uint32_t multiplier) noexcept { userGenerated=multiplier>=2 && multiplier<=6?multiplier-1:0; }
+void SetGameMultiplier(uint32_t multiplier) noexcept {
+  userGenerated=multiplier>=2 && multiplier<=6?multiplier-1:0;
+#ifdef MFGUNLOCK_XEMFG_VULKAN
+  native::vulkan::SetFrames(multiplier);
+#endif
+}
 bool GameContextInitializing() noexcept { return gameInitializing || gameInits.load()>0; }
 bool GameOwnsFrameGeneration() noexcept { return GameContextInitializing() || gameContexts.load()>0; }
 uint32_t FlipQueueNativeBuffers() noexcept { return ConfigureFlipQueue().buffers; }

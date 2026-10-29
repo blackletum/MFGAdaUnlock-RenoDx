@@ -723,6 +723,7 @@ public:
     // VK_KHR_present_id's presentId feature is on (Reflex's present markers name the real frame's present).
     bool lowLatency2() const { return vk_.vkSetLatencySleepModeNV && vk_.vkLatencySleepNV && vk_.vkSetLatencyMarkerNV; }
     bool presentIds() const { return presentIds_; }
+    bool presentMetering() const { return presentMetering_; }   // MFGAdaUnlock 1.7
     // Reflex's sleep signal (a timeline semaphore, created on first use; null when it could not be), and the value the
     // next sleep signals (never reused: a sleep that timed out still signals its own).
     VkSemaphore LatencySemaphore();
@@ -771,6 +772,7 @@ private:
     ProgramSet programs_;
     bool calibrated_ = false;
     bool presentIds_ = false;
+    bool presentMetering_ = false;   // MFGAdaUnlock 1.7
     std::mutex latencyMutex_;                       // latencySemaphore_'s creation
     VkSemaphore latencySemaphore_ = VK_NULL_HANDLE;
     std::atomic<uint64_t> latencyValue_{0};

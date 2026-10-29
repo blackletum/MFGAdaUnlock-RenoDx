@@ -37,11 +37,16 @@ struct DeviceDesc
     HMODULE programModule = nullptr;                    // module holding the embedded program set
     bool calibratedTimestamps = false;                  // VK_KHR/EXT_calibrated_timestamps enabled on the device
     bool presentIds = false;                            // vkreflex.1: VK_KHR_present_id with its presentId feature on
+    bool presentMetering = false;                       // MFGAdaUnlock 1.7: VK_NV_present_metering with its feature on
     // Optional: device functions to use instead of vkGetDeviceProcAddr's (a host whose swap chain and present
     // entries are hooked passes its originals, so the layer's own calls never re-enter its hooks). Null = loader's.
     PFN_vkVoidFunction (VKAPI_PTR* deviceProcOverride)(void* user, const char* name) = nullptr;
     void* deviceProcOverrideUser = nullptr;
 };
+
+// MFGAdaUnlock 1.7: the frames XeFG presents per base frame for the driver's present metering (VK_NV_present_metering,
+// the Vulkan form of NVIDIA's flip metering): each batch's first present carries VkSetPresentConfigNV. 0 or 1: no batch.
+void SetPresentMeteringBatch(uint32_t frames) noexcept;
 
 // What the device needs. The SPIR-V is version 1.6, so the device must run at Vulkan 1.3 or later.
 constexpr uint32_t kRequiredApiVersion = VK_API_VERSION_1_3;

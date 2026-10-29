@@ -2,6 +2,9 @@
 // Own overlay/control implementation. No OptiScaler code is incorporated.
 #include "native_internal.hpp"
 #include "native_controls.hpp"
+#ifdef MFGUNLOCK_XEMFG_VULKAN
+#include "native_vulkan.hpp"
+#endif
 #include "native_overlay.hpp"
 #include "backend_api.hpp"
 #include "../backend_selection.hpp"
@@ -182,7 +185,13 @@ ControlStatus ControlsSnapshot() {
 void DrawControls(PanelPage page) {
   const auto status=ControlsSnapshot(); auto value=status.settings;
   const bool metering=status.flipMetered && !status.flipBusy;
-  const char* flip=status.sdkDeadlinesActive?"Intel SDK timing (experimental)":status.flipBusy?"Checking...":!status.flipAvailable?"XeFG pacing (driver unavailable)":
+#ifdef MFGUNLOCK_XEMFG_VULKAN
+  // 1.7 (plan F): the Vulkan host paces with XeLL and the CPU pacer (no NVIDIA flip metering on its device).
+  const bool vulkanHost=vulkan::Status().game;
+#else
+  const bool vulkanHost=false;
+#endif
+  const char* flip=vulkanHost?"XeFG pacing (Vulkan)":status.sdkDeadlinesActive?"Intel SDK timing (experimental)":status.flipBusy?"Checking...":!status.flipAvailable?"XeFG pacing (driver unavailable)":
       !status.flipRegistered || !status.flipQueue?"Waiting for frame generation":
       status.flipRefused?"XeFG pacing (driver declined)":metering?"NVIDIA driver - active":
       status.flipConfigured?"XeFG pacing (current display mode)":!status.flipEnabled?"XeFG pacing (driver metering off)":"Waiting for a stable frame rate";
