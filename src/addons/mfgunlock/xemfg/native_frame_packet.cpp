@@ -249,7 +249,7 @@ void SubmitResource(Output& o,Frame& frame,uint32_t id,const Resource& t) {
   // HUD is still interpolated at the output rate. XeFG keeps only the first
   // tag of a type per frame, so the game's own HUD tags are held back here.
   // The game's HUD-less is kept for the mask: a volatile one is copied now.
-  if(optional && (ControlsSettings().uiStabilization || ControlsSettings().uiInterpolation)) {
+  if(optional && ControlsSettings().uiStabilization) {
     if(type==XEFG_SWAPCHAIN_RES_HUDLESS_COLOR && !encodeScrgb) {
       const DejitterRegion region{uint32_t(data.resourceBase.x),uint32_t(data.resourceBase.y),data.resourceSize.x,data.resourceSize.y};
       if(data.validity==XEFG_SWAPCHAIN_RV_ONLY_NOW) {
@@ -281,21 +281,6 @@ void SubmitResource(Output& o,Frame& frame,uint32_t id,const Resource& t) {
           +",\"lifecycle\":"+std::to_string(t.rawLifecycle));
     }
     return;
-  }
-  // 1.7 (plan I.8): HUD interpolation also reads the game's motion vectors;
-  // a volatile tag is copied now, before the tag below consumes it.
-  if(type==XEFG_SWAPCHAIN_RES_MOTION_VECTOR && ControlsSettings().uiInterpolation) {
-    const DejitterRegion region{uint32_t(data.resourceBase.x),uint32_t(data.resourceBase.y),data.resourceSize.x,data.resourceSize.y};
-    if(data.validity==XEFG_SWAPCHAIN_RV_ONLY_NOW) {
-      if(!o.hudCopy) {
-        auto copy=std::make_unique<HudCopy>();
-        if(copy->Initialize(o.device.Get())) o.hudCopy=std::move(copy);
-      }
-      ComPtr<ID3D12GraphicsCommandList> graphics;
-      ID3D12Resource* copy=o.hudCopy && list && SUCCEEDED(list.As(&graphics))
-          ?o.hudCopy->Record(graphics.Get(),resource.Get(),data.incomingState,region,desc.Format,2,id):nullptr;
-      if(copy) frame.heldMotion={copy,D3D12_RESOURCE_STATE_COMMON,{0,0,region.width,region.height},type,false};
-    } else frame.heldMotion={resource,data.incomingState,region,type,false};
   }
   const auto code=[&] {
     if(type==XEFG_SWAPCHAIN_RES_MOTION_VECTOR && o.dejitter) return StageMotion(o,frame,list.Get(),resource.Get(),data,id);

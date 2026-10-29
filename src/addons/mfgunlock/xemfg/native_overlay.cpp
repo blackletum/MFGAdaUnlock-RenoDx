@@ -4,7 +4,6 @@
 #include "native_internal.hpp"
 #include "native_overlay.hpp"
 #include "native_continuity.hpp"
-#include "vendor/sdk_pacing.h"
 #include "../backend_selection.hpp"
 #include <deps/imgui/imgui.h>
 #include <reshade.hpp>
@@ -42,43 +41,6 @@ class FinalOutput final:public IDXGISwapChain4 {
     if(!runtime) return;
     reshade::destroy_effect_runtime(runtime); runtime=nullptr; ++destroyed;
   }
-  // 1.7 (plan I): a generated output of a batch whose real frame was captured
-  // for HUD interpolation gets the HUD drawn at its phase. Runs inside the
-  // provider's native Present, which published the output (sdk_pacing).
-  void ComposeHud(UINT flags) {
-    if(flags&DXGI_PRESENT_TEST) return;
-    const auto presented=sdk_pacing::CurrentOutput();
-    if(!presented.active) return;
-    // XeFG\"s frame value carries the present id (xefgSwapChainSetPresentId)
-    // in its high 32 bits and its own output counter in the low 32 bits.
-    const uint64_t id=presented.frame>>32;
-    // The batch\"s generated outputs, counted here: they reach this Present
-    // in display order, and a real frame or a new id starts the next batch.
-    if(!presented.generated || id!=composeId) { composeId=id; composeIndex=0; }
-    const uint32_t index=presented.generated?composeIndex++:0;
-    bool ok{}; float phase{};
-    const auto owner=Active();
-    if(presented.generated && owner && owner->hudInterp && owner->uiInterpolated) {
-      const uint32_t multiplier=(std::max)(2u,State().multiplier.load());
-      phase=float((std::min)(index+1,multiplier-1))/float(multiplier);
-      ComPtr<ID3D12Resource> target;
-      if(SUCCEEDED(chain->GetBuffer(chain->GetCurrentBackBufferIndex(),IID_PPV_ARGS(&target)))) {
-        RuntimeCall trace("hud_interpolation_compose",diagnosticOutput,id);
-        ok=owner->hudInterp->Compose(queue.Get(),target.Get(),id,phase);
-        trace.Result(ok?0:-1);
-      }
-    }
-    if(composeLogs<16 && owner && owner->uiInterpolated) {
-      ++composeLogs;
-      xess_mod::WriteLog("native_hud_compose","\"id\":"+std::to_string(id)+",\"low\":"+std::to_string(uint32_t(presented.frame))
-          +",\"generated\":"+(presented.generated?"true":"false")+",\"site\":"+std::to_string(presented.site)
-          +",\"sdk_index\":"+std::to_string(presented.index)+",\"index\":"+std::to_string(index)
-          +",\"phase\":"+std::to_string(phase)+",\"ok\":"+(ok?"true":"false"));
-    }
-  }
-  unsigned composeLogs{};
-  uint64_t composeId{UINT64_MAX};
-  uint32_t composeIndex{};
   void Render(UINT flags) {
     if(TraceEnabled() && !diagnosticOutput) if(auto owner=Active())diagnosticOutput=owner->diagnosticOutput;
     if(GpuTraceEnabled() && !gpuTrace)gpuTrace=std::make_unique<QueueTrace>(device.Get(),queue.Get(),diagnosticOutput,"presentation");
@@ -125,14 +87,14 @@ public:
   ULONG STDMETHODCALLTYPE AddRef() override { return ++refs; }
   ULONG STDMETHODCALLTYPE Release() override { const auto n=--refs; if(!n) delete this; return n; }
   HRESULT STDMETHODCALLTYPE Present(UINT sync,UINT flags) override {
-    { std::lock_guard guard(lock); ComposeHud(flags); Render(flags); }
+    { std::lock_guard guard(lock); Render(flags); }
     // DXGI may wait on the window thread. The SDK owns external Present/Resize
     // ordering; do not hold our runtime lock across the native call.
     RuntimeCall trace("native_present",diagnosticOutput);const auto r=chain->Present(sync,flags);trace.Result(r);
     {std::lock_guard guard(lock);if(gpuTrace)gpuTrace->End();}return r;
   }
   HRESULT STDMETHODCALLTYPE Present1(UINT sync,UINT flags,const DXGI_PRESENT_PARAMETERS* parameters) override {
-    { std::lock_guard guard(lock); ComposeHud(flags); Render(flags); }
+    { std::lock_guard guard(lock); Render(flags); }
     RuntimeCall trace("native_present1",diagnosticOutput);const auto r=chain->Present1(sync,flags,parameters);trace.Result(r);
     {std::lock_guard guard(lock);if(gpuTrace)gpuTrace->End();}return r;
   }

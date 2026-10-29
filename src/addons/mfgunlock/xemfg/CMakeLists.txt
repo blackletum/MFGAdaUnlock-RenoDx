@@ -54,30 +54,6 @@ add_custom_command(OUTPUT "${XEMFG_SHADER_HEADERS}/native_dejitter_cs.h"
   COMMAND "${XEMFG_FXC}" /nologo /T cs_5_0 /E main /O3 /Vn g_native_dejitter_cs
     /Fh "${XEMFG_SHADER_HEADERS}/native_dejitter_cs.h" "${CMAKE_CURRENT_SOURCE_DIR}/native_dejitter.hlsl"
   DEPENDS native_dejitter.hlsl VERBATIM)
-# 1.7 (plan I): HUD interpolation (fullscreen triangle, premultiplied blend).
-foreach(stage IN ITEMS vs ps)
-  set(XEMFG_ENTRY FullscreenVS)
-  if(stage STREQUAL "ps")
-    set(XEMFG_ENTRY ComposePS)
-  endif()
-  add_custom_command(OUTPUT "${XEMFG_SHADER_HEADERS}/native_hud_interpolation_${stage}.h"
-    COMMAND "${CMAKE_COMMAND}" -E make_directory "${XEMFG_SHADER_HEADERS}"
-    COMMAND "${XEMFG_FXC}" /nologo /T ${stage}_5_0 /E ${XEMFG_ENTRY} /O3 /Vn g_native_hud_interpolation_${stage}
-      /Fh "${XEMFG_SHADER_HEADERS}/native_hud_interpolation_${stage}.h" "${CMAKE_CURRENT_SOURCE_DIR}/native_hud_interpolation.hlsl"
-    DEPENDS native_hud_interpolation.hlsl VERBATIM)
-endforeach()
-# 1.7 (plan I.7): HUD layer and HUD motion for HUD interpolation.
-foreach(entry IN ITEMS layer motion label represent score min elect agree final)
-  string(SUBSTRING "${entry}" 0 1 XEMFG_FIRST)
-  string(TOUPPER "${XEMFG_FIRST}" XEMFG_FIRST)
-  string(SUBSTRING "${entry}" 1 -1 XEMFG_REST)
-  set(XEMFG_ENTRY "${XEMFG_FIRST}${XEMFG_REST}CS")
-  add_custom_command(OUTPUT "${XEMFG_SHADER_HEADERS}/native_hud_${entry}_cs.h"
-    COMMAND "${CMAKE_COMMAND}" -E make_directory "${XEMFG_SHADER_HEADERS}"
-    COMMAND "${XEMFG_FXC}" /nologo /T cs_5_0 /E ${XEMFG_ENTRY} /O3 /Vn g_native_hud_${entry}_cs
-      /Fh "${XEMFG_SHADER_HEADERS}/native_hud_${entry}_cs.h" "${CMAKE_CURRENT_SOURCE_DIR}/native_hud_motion.hlsl"
-    DEPENDS native_hud_motion.hlsl VERBATIM)
-endforeach()
 # 1.7 (plan E.2): the HUD stabilization mask.
 add_custom_command(OUTPUT "${XEMFG_SHADER_HEADERS}/native_ui_mask_cs.h"
   COMMAND "${CMAKE_COMMAND}" -E make_directory "${XEMFG_SHADER_HEADERS}"
@@ -99,13 +75,6 @@ foreach(stage IN ITEMS vs ps)
 endforeach()
 set(XEMFG_GPU_PASS_SOURCES native_dejitter.cpp native_hud_copy.cpp "${XEMFG_SHADER_HEADERS}/native_dejitter_cs.h"
   native_ui_mask.cpp "${XEMFG_SHADER_HEADERS}/native_ui_mask_cs.h"
-  native_hud_interpolation.cpp "${XEMFG_SHADER_HEADERS}/native_hud_interpolation_vs.h"
-  "${XEMFG_SHADER_HEADERS}/native_hud_interpolation_ps.h"
-  "${XEMFG_SHADER_HEADERS}/native_hud_layer_cs.h" "${XEMFG_SHADER_HEADERS}/native_hud_motion_cs.h"
-  "${XEMFG_SHADER_HEADERS}/native_hud_label_cs.h" "${XEMFG_SHADER_HEADERS}/native_hud_represent_cs.h"
-  "${XEMFG_SHADER_HEADERS}/native_hud_score_cs.h" "${XEMFG_SHADER_HEADERS}/native_hud_min_cs.h"
-  "${XEMFG_SHADER_HEADERS}/native_hud_elect_cs.h" "${XEMFG_SHADER_HEADERS}/native_hud_agree_cs.h"
-  "${XEMFG_SHADER_HEADERS}/native_hud_final_cs.h"
   native_scrgb.cpp "${XEMFG_SHADER_HEADERS}/native_scrgb_vs.h" "${XEMFG_SHADER_HEADERS}/native_scrgb_ps.h")
 
 add_library(mfgunlock_native_xemfg SHARED ../addon.cpp ${XEMFG_MODEL_SOURCES}
@@ -229,12 +198,6 @@ target_link_libraries(xemfg_ui_mask_numeric PRIVATE d3d12 dxgi)
 target_compile_definitions(xemfg_ui_mask_numeric PRIVATE NOMINMAX)
 add_test(NAME xemfg_ui_mask_numeric COMMAND xemfg_ui_mask_numeric)
 set_tests_properties(xemfg_ui_mask_numeric PROPERTIES TIMEOUT 60)
-add_executable(xemfg_hud_interpolation_numeric "${CMAKE_SOURCE_DIR}/xemfg_hud_interpolation_numeric.cpp" ${XEMFG_GPU_PASS_SOURCES})
-target_include_directories(xemfg_hud_interpolation_numeric PRIVATE "${XEMFG_SHADER_HEADERS}")
-target_link_libraries(xemfg_hud_interpolation_numeric PRIVATE d3d12 dxgi)
-target_compile_definitions(xemfg_hud_interpolation_numeric PRIVATE NOMINMAX)
-add_test(NAME xemfg_hud_interpolation_numeric COMMAND xemfg_hud_interpolation_numeric)
-set_tests_properties(xemfg_hud_interpolation_numeric PROPERTIES TIMEOUT 60)
 add_executable(xemfg_scrgb_numeric "${CMAKE_SOURCE_DIR}/xemfg_scrgb_numeric.cpp" ${XEMFG_GPU_PASS_SOURCES})
 target_include_directories(xemfg_scrgb_numeric PRIVATE "${XEMFG_SHADER_HEADERS}")
 target_link_libraries(xemfg_scrgb_numeric PRIVATE d3d12 dxgi)

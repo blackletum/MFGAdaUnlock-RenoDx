@@ -11,7 +11,6 @@
 #include "native_session.hpp"
 #include "native_dejitter.hpp"
 #include "native_ui_mask.hpp"
-#include "native_hud_interpolation.hpp"
 #include "native_scrgb.hpp"
 #include "native_hud_copy.hpp"
 #include "display_cap.hpp"
@@ -88,9 +87,6 @@ struct Frame {
   // 1.7 (plan E.2): the game's HUD-less color, held back from XeFG while HUD
   // stabilization runs; it tells the mask exactly where HUD is drawn.
   PendingHud heldHudless;
-  // 1.7 (plan I.8): the game's motion vectors, kept for HUD interpolation:
-  // they predict where world-anchored HUD (markers, names) moved.
-  PendingHud heldMotion;
   uint32_t constantIssues{};
   LatencyOutput latencyOutput{LatencyOutput::XeLL};
   xefg_swapchain_frame_constant_data_t data{};
@@ -155,11 +151,6 @@ struct Output {
   std::unique_ptr<UiMask> uiMask;
   bool uiStabilized{}, uiMaskFailed{};
   uint32_t uiMaskLogBudget{};
-  // 1.7 (plan I): HUD interpolation; created on first use. The final swap
-  // chain's Present composes with it on XeFG's presentation thread.
-  std::unique_ptr<HudInterpolator> hudInterp;
-  bool uiInterpolated{}, hudInterpFailed{};
-  uint32_t hudInterpLogBudget{};
   uint64_t refreshTick{};
   bool displayCapLogged{};
   int64_t lastSourcePresentQpc{};
@@ -258,9 +249,6 @@ bool ApplyUiComposition(Output& output,bool hudlessAvailable,bool stabilized=fal
 // 1.7 (plan E.2): records the HUD stabilization pass for `id` and tags its
 // HUD-less and UI outputs. False leaves the frame without them.
 bool StabilizeHud(Output& output,Frame& frame,uint32_t id);
-// 1.7 (plan I): captures frame `id` for HUD interpolation and tags the game's
-// HUD-less copy and an empty UI. False leaves the frame without them.
-bool CaptureHudInterpolation(Output& output,Frame& frame,uint32_t id);
 void Report(const char* reason);
 bool Hook(void* entry,void* replacement,void** trampoline);
 void DiscoverStreamline();

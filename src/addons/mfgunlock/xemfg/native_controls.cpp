@@ -47,7 +47,6 @@ void LoadControls() {
   settings.forceBorderless=false;
   settings.uiComposition=ReadBool(L"XeFG",L"UIComposition",false);
   settings.uiStabilization=ReadBool(L"XeFG",L"UIStabilization",false);
-  settings.uiInterpolation=ReadBool(L"XeFG",L"UIInterpolation",false);
   settings.sdkDeadlines=ReadBool(L"XeFG",L"SdkDeadlines",false);
   sdk_pacing::RequestSdkDeadlines(settings.sdkDeadlines);
   settings.forceVSyncOff=ReadBool(L"XeFG",L"ForceVSyncOff",false);
@@ -78,7 +77,6 @@ bool ConfigureControls(const ControlSettings& incoming) {
     {L"XeFG",L"ForceBorderless",value.forceBorderless?L"1":L"0"},
     {L"XeFG",L"UIComposition",value.uiComposition?L"1":L"0"},
     {L"XeFG",L"UIStabilization",value.uiStabilization?L"1":L"0"},
-    {L"XeFG",L"UIInterpolation",value.uiInterpolation?L"1":L"0"},
     {L"XeFG",L"SdkDeadlines",value.sdkDeadlines?L"1":L"0"},
     {L"XeFG",L"ForceVSyncOff",value.forceVSyncOff?L"1":L"0"},
     {L"XeFG",L"DisplayCap",value.displayCap?L"1":L"0"},
@@ -99,7 +97,6 @@ bool ConfigureControls(const ControlSettings& incoming) {
       +",\"borderless_requested\":"+(value.forceBorderless?"true":"false")
       +",\"ui_composition_requested\":"+(value.uiComposition?"true":"false")
       +",\"ui_stabilization\":"+(value.uiStabilization?"true":"false")
-      +",\"ui_interpolation\":"+(value.uiInterpolation?"true":"false")
       +",\"force_vsync_off\":"+(value.forceVSyncOff?"true":"false")+",\"display_cap\":"+(value.displayCap?"true":"false")
       +",\"exclusive_as_borderless\":"+(value.exclusiveAsBorderless?"true":"false")+",\"saved\":"+(saved?"true":"false"));
   return saved;
@@ -147,15 +144,14 @@ ControlStatus ControlsSnapshot() {
     // and pacing lines, and the rows below them, flicker (1.5.7).
     struct LastRead {
       uint64_t output{}; void* pacing{};
-      bool available{},applied{},known{}; int result{}; uint64_t updates{}; bool stabilized{},interpolated{};
+      bool available{},applied{},known{}; int result{}; uint64_t updates{}; bool stabilized{};
     };
     static std::mutex lastLock; static LastRead last;
     std::unique_lock guard(output->io,std::try_to_lock);
     std::lock_guard lastGuard(lastLock);
     if(guard.owns_lock())
       last={output->diagnosticOutput,output->fg,output->uiCompositionAvailable,output->uiCompositionApplied,
-          output->uiCompositionKnown,output->uiCompositionResult,output->uiCompositionUpdates,output->uiStabilized,
-          output->uiInterpolated};
+          output->uiCompositionKnown,output->uiCompositionResult,output->uiCompositionUpdates,output->uiStabilized};
     if(last.output==output->diagnosticOutput) {
       pacingHandle=last.pacing;
       result.uiCompositionAvailable=last.available;
@@ -164,11 +160,6 @@ ControlStatus ControlsSnapshot() {
       result.uiCompositionResult=last.result;
       result.uiCompositionUpdates=last.updates;
       result.uiStabilized=last.stabilized;
-      result.uiInterpolated=last.interpolated;
-      if(output->hudInterp) {
-        const auto counters=output->hudInterp->Snapshot();
-        result.hudComposed=counters.composed; result.hudMissing=counters.missing;
-      }
     }
   }
   if(output && output->window) {
@@ -205,8 +196,7 @@ void DrawControls(PanelPage page) {
   constexpr const char* flipHelp="Uses the NVIDIA driver to space generated frames evenly. Leave enabled for driver pacing when available; otherwise XeFG uses its own pacing. Changes apply at the next frame group. Active reports driver acceptance, not a monitor scanout measurement.";
   constexpr const char* compositionHelp="Off by default: XeFG interpolates the HUD with the image. Enable only if HUD interpolation causes artifacts. Composition needs HUD-less color from the game and updates the HUD at the real frame rate, so moving HUD elements may look less smooth. Changes apply at the next source frame.";
   constexpr const char* stabilizationHelp="Experimental, off by default. For games that do not provide HUD-less color: pixels that stay unchanged for a few real frames (static HUD text, icons and the minimap frame) are composed from the newest real frame over every generated frame instead of being interpolated, which removes their flicker. Moving or semi-transparent HUD elements are still interpolated. Costs one copy and one small compute pass per real frame. Also works in games that provide HUD-less color, as an alternative to UI Composition: UI Composition updates the whole HUD at the real frame rate, while this keeps moving HUD interpolated at the output rate. When on, it replaces UI Composition.";
-  constexpr const char* interpolationHelp="Experimental, off by default. Needs a game that provides HUD-less color (for example Cyberpunk 2077 or Dragon's Dogma 2). XeFG interpolates only the image without HUD, and the addon draws the HUD on every generated frame, fading between the HUD of the previous and the current real frame. The HUD then never deforms over moving objects and still changes on every displayed frame. HUD that moves across the screen fades between its two positions instead of sliding. Takes precedence over HUD stabilization and UI Composition.";
-  const char* composition=!status.uiCompositionKnown?"Waiting for frame status":status.uiInterpolated?"HUD interpolation (addon)":status.uiStabilized?"HUD stabilization (static HUD composed)":status.uiCompositionApplied?"UI composition":
+  const char* composition=!status.uiCompositionKnown?"Waiting for frame status":status.uiStabilized?"HUD stabilization (static HUD composed)":status.uiCompositionApplied?"UI composition":
       value.uiComposition && !status.uiCompositionAvailable?"Waiting for HUD-less input":
       value.uiComposition?"Change pending":value.uiStabilization && !status.uiCompositionAvailable?"Waiting for HUD stabilization":"UI interpolation (default)";
   if(page==PanelPage::General) {
@@ -292,12 +282,7 @@ void DrawControls(PanelPage page) {
     ui::Setting("##xe_stabilization_row","HUD stabilization (experimental)",stabilizationHelp,[&] {
       if(ImGui::Checkbox("##xe_ui_stabilization",&value.uiStabilization)) ConfigureControls(value);
     });
-    ui::Setting("##xe_interpolation_row","HUD interpolation (experimental)",interpolationHelp,[&] {
-      if(ImGui::Checkbox("##xe_ui_interpolation",&value.uiInterpolation)) ConfigureControls(value);
-    });
     ui::Readout("##xe_composition_state","HUD handling",composition,compositionHelp);
-    if(value.uiInterpolation && !status.uiInterpolated && status.uiCompositionKnown)
-      ui::Description("HUD interpolation waits for HUD-less color from the game; without it, HUD stabilization or interpolation by XeFG applies.");
     // 1.5.7: what the game provides, per kind: received, converted, filtered or absent.
     const auto hudKind=[&](unsigned type,const char* name) {
       const uint32_t bit=1u<<type;

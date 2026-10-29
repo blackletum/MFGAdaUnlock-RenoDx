@@ -845,14 +845,8 @@ void BeforePresent(const std::shared_ptr<Output>& o) {
       && (frame->resources&(1u<<XEFG_SWAPCHAIN_RES_HUDLESS_COLOR));
   // 1.7 (plan E.2): with HUD stabilization on, the game's HUD tags were held
   // back (SubmitResource), so `hudless` is false and the addon's inputs apply.
-  const auto controls=ControlsSettings();
-  // 1.7 (plan I): HUD interpolation first (needs the game's HUD-less, held
-  // back by SubmitResource), then HUD stabilization.
-  const bool interpolated=!hudless && frame && !frame->failed && controls.uiInterpolation
-      && CaptureHudInterpolation(*o,*frame,id);
-  if(!interpolated) o->uiInterpolated=false;
-  const bool stabilized=interpolated || (!hudless && frame && !frame->failed && controls.uiStabilization
-      && StabilizeHud(*o,*frame,id));
+  const bool stabilized=!hudless && frame && !frame->failed && ControlsSettings().uiStabilization
+      && StabilizeHud(*o,*frame,id);
   const bool compositionReady=ApplyUiComposition(*o,hudless || stabilized,stabilized);
   constexpr uint32_t required=(1u<<XEFG_SWAPCHAIN_RES_DEPTH)|(1u<<XEFG_SWAPCHAIN_RES_MOTION_VECTOR);
   const bool nativeReflex=s.latencyOutput.load()==LatencyOutput::Reflex;
@@ -968,15 +962,6 @@ static void WriteSummary(Output& o,const xefg_swapchain_present_status_t& status
       +",\"sleeps_rejected\":"+std::to_string(o.rejectedExplicitSleeps-o.summarySleeps)
       +",\"game_sync_interval\":"+(sync==UINT32_MAX?std::string("-1"):std::to_string(sync))
       +",\"force_vsync_off\":"+std::to_string(ForceVSyncOff()));
-  // 1.7 (plan I): HUD interpolation totals since the output started.
-  if(o.hudInterp) {
-    const auto hud=o.hudInterp->Snapshot();
-    xess_mod::WriteLog("native_hud_summary","\"output\":"+std::to_string(o.diagnosticOutput)
-        +",\"captures\":"+std::to_string(hud.captures)+",\"motion_fields\":"+std::to_string(hud.motionFields)
-        +",\"composed\":"+std::to_string(hud.composed)+",\"missing\":"+std::to_string(hud.missing)
-        +",\"previous_missing\":"+std::to_string(hud.previousMissing)+",\"scene_seeded\":"+std::to_string(hud.sceneSeeded)
-        +",\"active\":"+std::to_string(o.uiInterpolated));
-  }
   baseline();
 }
 void AfterPresent(const std::shared_ptr<Output>& o,CpuProbe* probe,HRESULT result) {
