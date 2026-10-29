@@ -27,11 +27,11 @@ bool UiMask::Initialize(ID3D12Device* target,DXGI_FORMAT output) {
   if(FAILED(device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT,&support,sizeof(support)))
       || !(support.Support2&D3D12_FORMAT_SUPPORT2_UAV_TYPED_STORE)) return Fail(DXGI_ERROR_UNSUPPORTED);
   D3D12_DESCRIPTOR_RANGE ranges[2]{};
-  ranges[0]={D3D12_DESCRIPTOR_RANGE_TYPE_SRV,3,0,0,0};
-  ranges[1]={D3D12_DESCRIPTOR_RANGE_TYPE_UAV,2,0,0,3};
+  ranges[0]={D3D12_DESCRIPTOR_RANGE_TYPE_SRV,4,0,0,0};
+  ranges[1]={D3D12_DESCRIPTOR_RANGE_TYPE_UAV,2,0,0,4};
   D3D12_ROOT_PARAMETER parameters[2]{};
   parameters[0].ParameterType=D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-  parameters[0].Constants={0,0,5};
+  parameters[0].Constants={0,0,6};
   parameters[1].ParameterType=D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
   parameters[1].DescriptorTable={2,ranges};
   D3D12_ROOT_SIGNATURE_DESC desc{2,parameters,0,nullptr,D3D12_ROOT_SIGNATURE_FLAG_NONE};
@@ -42,7 +42,7 @@ bool UiMask::Initialize(ID3D12Device* target,DXGI_FORMAT output) {
   D3D12_COMPUTE_PIPELINE_STATE_DESC pso{};
   pso.pRootSignature=root.Get(); pso.CS={g_native_ui_mask_cs,sizeof(g_native_ui_mask_cs)};
   if(FAILED(hr=device->CreateComputePipelineState(&pso,IID_PPV_ARGS(&pipeline)))) return Fail(hr);
-  D3D12_DESCRIPTOR_HEAP_DESC hd{D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,kSlots*5,D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE,0};
+  D3D12_DESCRIPTOR_HEAP_DESC hd{D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,kSlots*6,D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE,0};
   if(FAILED(hr=device->CreateDescriptorHeap(&hd,IID_PPV_ARGS(&heap)))) return Fail(hr);
   descriptorSize=device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
   for(auto& allocator:allocators)
@@ -58,7 +58,7 @@ bool UiMask::Ensure(ComPtr<ID3D12Resource>& texture,DXGI_FORMAT textureFormat,ui
   if(texture) {
     const auto d=texture->GetDesc();
     if(d.Format==textureFormat && d.Width==width && d.Height==height) return true;
-    texture.Reset(); history=false;
+    texture.Reset();
   }
   D3D12_HEAP_PROPERTIES heapProps{D3D12_HEAP_TYPE_DEFAULT};
   D3D12_RESOURCE_DESC d{};
@@ -68,6 +68,7 @@ bool UiMask::Ensure(ComPtr<ID3D12Resource>& texture,DXGI_FORMAT textureFormat,ui
   return SUCCEEDED(hr)?true:Fail(hr);
 }
 ID3D12GraphicsCommandList* UiMask::Record(ID3D12Resource* backbuffer,D3D12_RESOURCE_STATES state,
+    ID3D12Resource* reference,D3D12_RESOURCE_STATES referenceState,const DejitterRegion& area,
     ID3D12Resource** hudlessOut,ID3D12Resource** uiOut) {
   const auto bd=backbuffer?backbuffer->GetDesc():D3D12_RESOURCE_DESC{};
   if(open || !backbuffer || bd.Format!=format || !bd.Width || !bd.Height) { Fail(E_INVALIDARG); return nullptr; }
@@ -83,9 +84,15 @@ ID3D12GraphicsCommandList* UiMask::Record(ID3D12Resource* backbuffer,D3D12_RESOU
       || !Ensure(persist[0],DXGI_FORMAT_R8_UINT,width,height,D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,kReadable)
       || !Ensure(persist[1],DXGI_FORMAT_R8_UINT,width,height,D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,kReadable))
     return nullptr;
-  // The previous slot holds the previous real frame only when every texture
-  // survived and that frame was recorded at this size.
-  const bool continuous=history && hudless[previous];
+  usedReference=reference && area.width==width && area.height==height
+      && Ensure(referenceCopy,format,width,height,D3D12_RESOURCE_FLAG_NONE,kReadable);
+  // Coverage persistence and stillness persistence count different things.
+  if(usedReference!=referenceHistory) history=false;
+  referenceHistory=usedReference;
+  // The previous slot holds the previous real frame only when that frame was
+  // recorded at this size (each slot is recreated on its own first use after a
+  // resize; that alone must not restart the history again).
+  const bool continuous=history && historyWidth==width && historyHeight==height && hudless[previous];
   HRESULT hr=allocators[slot]->Reset();
   if(SUCCEEDED(hr)) hr=list->Reset(allocators[slot].Get(),pipeline.Get());
   if(FAILED(hr)) { Fail(hr); return nullptr; }
@@ -95,9 +102,20 @@ ID3D12GraphicsCommandList* UiMask::Record(ID3D12Resource* backbuffer,D3D12_RESOU
   Transition(list.Get(),hudless[slot].Get(),kReadable,D3D12_RESOURCE_STATE_COPY_DEST);
   list->CopyResource(hudless[slot].Get(),backbuffer);
   Transition(list.Get(),hudless[slot].Get(),D3D12_RESOURCE_STATE_COPY_DEST,kReadable);
+  if(usedReference) {
+    // The game's resource is only read here and returned to its own state.
+    Transition(list.Get(),reference,referenceState,D3D12_RESOURCE_STATE_COPY_SOURCE);
+    Transition(list.Get(),referenceCopy.Get(),kReadable,D3D12_RESOURCE_STATE_COPY_DEST);
+    D3D12_TEXTURE_COPY_LOCATION dst{referenceCopy.Get(),D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,{}};
+    D3D12_TEXTURE_COPY_LOCATION src{reference,D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,{}};
+    const D3D12_BOX box{area.x,area.y,0,area.x+area.width,area.y+area.height,1};
+    list->CopyTextureRegion(&dst,0,0,0,&src,&box);
+    Transition(list.Get(),referenceCopy.Get(),D3D12_RESOURCE_STATE_COPY_DEST,kReadable);
+    Transition(list.Get(),reference,D3D12_RESOURCE_STATE_COPY_SOURCE,referenceState);
+  }
 
-  auto cpu=heap->GetCPUDescriptorHandleForHeapStart(); cpu.ptr+=SIZE_T(slot)*5*descriptorSize;
-  auto gpu=heap->GetGPUDescriptorHandleForHeapStart(); gpu.ptr+=UINT64(slot)*5*descriptorSize;
+  auto cpu=heap->GetCPUDescriptorHandleForHeapStart(); cpu.ptr+=SIZE_T(slot)*6*descriptorSize;
+  auto gpu=heap->GetGPUDescriptorHandleForHeapStart(); gpu.ptr+=UINT64(slot)*6*descriptorSize;
   const auto srv=[&](ID3D12Resource* resource,DXGI_FORMAT viewFormat) {
     D3D12_SHADER_RESOURCE_VIEW_DESC view{}; view.Format=viewFormat; view.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D;
     view.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING; view.Texture2D.MipLevels=1;
@@ -112,6 +130,7 @@ ID3D12GraphicsCommandList* UiMask::Record(ID3D12Resource* backbuffer,D3D12_RESOU
   srv(backbuffer,format);
   srv(continuous?hudless[previous].Get():backbuffer,format);
   srv(persistIn,DXGI_FORMAT_R8_UINT);
+  srv(usedReference?referenceCopy.Get():backbuffer,format);
   uav(persistOut,DXGI_FORMAT_R8_UINT);
   uav(ui[slot].Get(),format);
   Transition(list.Get(),persistOut,kReadable,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -119,19 +138,21 @@ ID3D12GraphicsCommandList* UiMask::Record(ID3D12Resource* backbuffer,D3D12_RESOU
   ID3D12DescriptorHeap* heaps[]={heap.Get()};
   list->SetDescriptorHeaps(1,heaps);
   list->SetComputeRootSignature(root.Get());
-  // Without a previous frame the history starts empty: an unbounded
-  // threshold keeps every pixel transparent until real history exists.
-  const float tolerance=kTolerance;
-  const uint32_t constants[5]={width,height,continuous?kThreshold:0xFFFFFFFFu,
-      *reinterpret_cast<const uint32_t*>(&tolerance),continuous?0u:1u};
-  list->SetComputeRoot32BitConstants(0,5,constants,0);
+  // Without a previous frame the history starts empty. Stillness needs that
+  // previous frame, so an unbounded threshold keeps every pixel transparent;
+  // coverage does not, and counts from this frame.
+  const float tolerance=usedReference?kCoverageTolerance:kTolerance;
+  const uint32_t threshold=usedReference?kReferenceThreshold:continuous?kThreshold:0xFFFFFFFFu;
+  const uint32_t constants[6]={width,height,threshold,
+      *reinterpret_cast<const uint32_t*>(&tolerance),continuous?0u:1u,usedReference?1u:0u};
+  list->SetComputeRoot32BitConstants(0,6,constants,0);
   list->SetComputeRootDescriptorTable(1,gpu);
   list->Dispatch((width+7)/8,(height+7)/8,1);
   Transition(list.Get(),ui[slot].Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS,kReadable);
   Transition(list.Get(),persistOut,D3D12_RESOURCE_STATE_UNORDERED_ACCESS,kReadable);
   Transition(list.Get(),backbuffer,readBack,state);
   persistIndex^=1;
-  history=true;
+  history=true; historyWidth=width; historyHeight=height;
   *hudlessOut=hudless[slot].Get();
   *uiOut=ui[slot].Get();
   return list.Get();

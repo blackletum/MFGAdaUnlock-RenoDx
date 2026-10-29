@@ -846,7 +846,7 @@ void BeforePresent(const std::shared_ptr<Output>& o) {
   // 1.7 (plan E.2): with HUD stabilization on, the game's HUD tags were held
   // back (SubmitResource), so `hudless` is false and the addon's inputs apply.
   const bool stabilized=!hudless && frame && !frame->failed && ControlsSettings().uiStabilization
-      && StabilizeHud(*o,id);
+      && StabilizeHud(*o,*frame,id);
   const bool compositionReady=ApplyUiComposition(*o,hudless || stabilized,stabilized);
   constexpr uint32_t required=(1u<<XEFG_SWAPCHAIN_RES_DEPTH)|(1u<<XEFG_SWAPCHAIN_RES_MOTION_VECTOR);
   const bool nativeReflex=s.latencyOutput.load()==LatencyOutput::Reflex;

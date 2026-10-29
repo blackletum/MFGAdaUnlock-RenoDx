@@ -6,22 +6,33 @@
 Texture2D<float4> Current : register(t0);
 Texture2D<float4> Previous : register(t1);
 Texture2D<uint> PersistIn : register(t2);
+Texture2D<float4> Reference : register(t3); // the game's HUD-less color
 RWTexture2D<uint> PersistOut : register(u0);
 RWTexture2D<float4> Ui : register(u1);
 cbuffer Params : register(b0) {
   uint2 size;
   uint threshold;  // consecutive unchanged real frames before a pixel is HUD
-  float tolerance; // largest per-channel change still counted as unchanged
+  float tolerance; // stillness: largest per-channel change still unchanged;
+                   // coverage: smallest difference from HUD-less that is HUD
   uint reset;      // 1: no previous frame; history starts empty
+  uint coverage;   // 1: Reference is valid; count frames the pixel is HUD
 };
 [numthreads(8, 8, 1)]
 void main(uint3 id : SV_DispatchThreadID) {
   if (any(id.xy >= size)) return;
   const float4 c = Current[id.xy];
-  const float3 d = abs(c.rgb - Previous[id.xy].rgb);
-  const bool still = reset == 0 && max(d.r, max(d.g, d.b)) <= tolerance;
+  bool counted;
+  if (coverage != 0) {
+    // HUD wherever the back buffer differs from the HUD-less image, also for
+    // semi-transparent HUD over a moving scene.
+    const float3 h = abs(c.rgb - Reference[id.xy].rgb);
+    counted = max(h.r, max(h.g, h.b)) > tolerance;
+  } else {
+    const float3 d = abs(c.rgb - Previous[id.xy].rgb);
+    counted = reset == 0 && max(d.r, max(d.g, d.b)) <= tolerance;
+  }
   const uint before = reset != 0 ? 0u : PersistIn[id.xy];
-  const uint persist = still ? min(before + 1, 255u) : 0u;
+  const uint persist = counted ? min(before + 1, 255u) : 0u;
   PersistOut[id.xy] = persist;
   // One pixel of dilation, from the previous frame's persistence, covers the
   // anti-aliased edges of HUD glyphs, which blend with the moving scene.

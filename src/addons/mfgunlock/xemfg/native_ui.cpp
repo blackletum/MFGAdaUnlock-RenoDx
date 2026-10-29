@@ -28,7 +28,7 @@ bool ApplyUiComposition(Output& output,bool hudlessAvailable,bool stabilized) {
       +",\"known\":"+std::to_string(output.uiCompositionKnown)+",\"result\":"+std::to_string(result));
   return result>=0;
 }
-bool StabilizeHud(Output& o,uint32_t id) {
+bool StabilizeHud(Output& o,Frame& frame,uint32_t id) {
   if(o.uiMaskFailed || !UiMask::SupportedFormat(o.format)) return false;
   if(!o.uiMask) {
     auto mask=std::make_unique<UiMask>();
@@ -46,7 +46,9 @@ bool StabilizeHud(Output& o,uint32_t id) {
   if(a.xefgSwapChainD3D12GetSwapChainPtr(o.fg,IID_PPV_ARGS(&chain))!=0
       || FAILED(chain->GetBuffer(chain->GetCurrentBackBufferIndex(),IID_PPV_ARGS(&backbuffer)))) return false;
   ID3D12Resource* hudless{}; ID3D12Resource* ui{};
-  auto* list=o.uiMask->Record(backbuffer.Get(),D3D12_RESOURCE_STATE_PRESENT,&hudless,&ui);
+  const auto& held=frame.heldHudless;
+  auto* list=o.uiMask->Record(backbuffer.Get(),D3D12_RESOURCE_STATE_PRESENT,held.source.Get(),held.state,held.region,
+      &hudless,&ui);
   int tags[2]{XEFG_SWAPCHAIN_RESULT_ERROR_INVALID_ARGUMENT,XEFG_SWAPCHAIN_RESULT_ERROR_INVALID_ARGUMENT};
   bool ok=false;
   if(list) {
@@ -69,6 +71,7 @@ bool StabilizeHud(Output& o,uint32_t id) {
     ++o.uiMaskLogBudget;
     xess_mod::WriteLog("native_ui_stabilization","\"id\":"+std::to_string(id)+",\"ok\":"+(ok?"true":"false")
         +",\"hudless_tag\":"+std::to_string(tags[0])+",\"ui_tag\":"+std::to_string(tags[1])
+        +",\"reference\":"+(o.uiMask->UsedReference()?"true":"false")
         +",\"hr\":"+std::to_string(int32_t(o.uiMask->LastError())));
   }
   return ok;

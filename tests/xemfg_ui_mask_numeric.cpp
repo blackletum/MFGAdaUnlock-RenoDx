@@ -112,7 +112,8 @@ int main() {
       const auto pixels=Frame(frame);
       auto backbuffer=gpu.BackBuffer(pixels,kWidth,kHeight);
       ID3D12Resource* hudless{}; ID3D12Resource* ui{};
-      Require(mask.Record(backbuffer.Get(),D3D12_RESOURCE_STATE_PRESENT,&hudless,&ui)!=nullptr,"record");
+      Require(mask.Record(backbuffer.Get(),D3D12_RESOURCE_STATE_PRESENT,nullptr,D3D12_RESOURCE_STATE_COMMON,{},
+          &hudless,&ui)!=nullptr && !mask.UsedReference(),"record");
       Require(mask.Submit(gpu.queue.Get()) && mask.Drain(5000),"submit");
       Require(gpu.Read(hudless)==pixels,"HUD-less is not an exact copy of the back buffer");
       const auto out=gpu.Read(ui);
@@ -130,10 +131,39 @@ int main() {
     const auto resized=Frame(1,32,16);
     auto backbuffer=gpu.BackBuffer(resized,32,16);
     ID3D12Resource* hudless{}; ID3D12Resource* ui{};
-    Require(mask.Record(backbuffer.Get(),D3D12_RESOURCE_STATE_PRESENT,&hudless,&ui) && mask.Submit(gpu.queue.Get())
+    Require(mask.Record(backbuffer.Get(),D3D12_RESOURCE_STATE_PRESENT,nullptr,D3D12_RESOURCE_STATE_COMMON,{},&hudless,&ui)
+        && mask.Submit(gpu.queue.Get())
         && mask.Drain(5000),"resized record");
     for(const auto v:gpu.Read(ui)) Require(v==0,"history survived a size change");
-    std::printf("PASS: static HUD composed after %u unchanged frames, scene transparent, HUD-less exact\n",UiMask::kThreshold);
+    // With the game's HUD-less image, coverage decides: a semi-transparent HUD
+    // block over a scene that changes every frame (never still) is composed
+    // after kReferenceThreshold frames, and the scene never is.
+    for(unsigned frame=0;frame<UiMask::kReferenceThreshold+2;++frame) {
+      std::vector<uint32_t> scene(size_t(kWidth)*kHeight), pixels(scene.size());
+      for(unsigned y=0;y<kHeight;++y) for(unsigned x=0;x<kWidth;++x) {
+        const uint32_t s=Scene(x,y,frame), i=size_t(y)*kWidth+x;
+        scene[i]=s;
+        // 50% white over the scene, per channel.
+        pixels[i]=InHud(x,y)?0xFF000000u|(((s&0xFF)+255)/2)|((((s>>8&0xFF)+255)/2)<<8)|((((s>>16&0xFF)+255)/2)<<16):s;
+      }
+      auto bb=gpu.BackBuffer(pixels,kWidth,kHeight);
+      auto reference=gpu.BackBuffer(scene,kWidth,kHeight);
+      Require(mask.Record(bb.Get(),D3D12_RESOURCE_STATE_PRESENT,reference.Get(),D3D12_RESOURCE_STATE_PRESENT,
+          {0,0,kWidth,kHeight},&hudless,&ui) && mask.UsedReference() && mask.Submit(gpu.queue.Get()) && mask.Drain(5000),
+          "reference record");
+      const auto out=gpu.Read(ui);
+      const bool hudExpected=frame+1>=UiMask::kReferenceThreshold;
+      for(unsigned y=0;y<kHeight;++y) for(unsigned x=0;x<kWidth;++x) {
+        const uint32_t v=out[size_t(y)*kWidth+x];
+        if(InHud(x,y) && !(hudExpected?v==pixels[size_t(y)*kWidth+x]:v==0)) {
+          std::fprintf(stderr,"frame %u x %u y %u got %08X want %08X\n",frame,x,y,unsigned(v),
+              unsigned(hudExpected?pixels[size_t(y)*kWidth+x]:0u));
+          throw std::runtime_error("covered HUD pixel");
+        }
+        else if(!NearHud(x,y)) Require(v==0,"scene composed with a HUD-less reference");
+      }
+    }
+    std::printf("PASS: static HUD composed after %u unchanged frames (covered HUD with a HUD-less reference too), scene transparent, HUD-less exact\n",UiMask::kThreshold);
     return 0;
   } catch(const std::exception& e) { std::fprintf(stderr,"%s\n",e.what()); return 1; }
 }
