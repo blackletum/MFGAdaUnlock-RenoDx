@@ -55,7 +55,7 @@ float4 ComposePS(float4 position : SV_Position) : SV_Target {
   bool moved = false, left = false;
   float2 candidates[10];
   [unroll] for (int k = 0; k < 9; ++k)
-    candidates[k] = float2(Motion.Load(int3(block + int2(k % 3 - 1, k / 3 - 1), 0)));
+    candidates[k] = float2(Motion.Load(int3(block + int2(int(uint(k) % 3u) - 1, int(uint(k) / 3u) - 1), 0)));
   candidates[9] = float2(SceneMotion.Load(int3(block, 0)));
   [unroll] for (int c = 0; c < 10; ++c) {
     const float2 d = candidates[c];
@@ -69,6 +69,16 @@ float4 ComposePS(float4 position : SV_Position) : SV_Target {
     if (score > best) { best = score; result = pair; moved = true; }
   }
   if (moved) return result;
+  // An element that moved up to 16 px may have left q from a block outside
+  // the 3x3 neighbourhood: look two blocks out for the trail check.
+  if (l0.a > 0 && !left) {
+    [loop] for (int ly = -2; ly <= 2 && !left; ++ly) {
+      [loop] for (int lx = -2; lx <= 2; ++lx) {
+        const float2 d = float2(Motion.Load(int3(block + int2(lx, ly), 0)));
+        if (any(d != 0) && MatchedAt(q - d, d)) { left = true; break; }
+      }
+    }
+  }
   // Nothing moves through q at phase t. Drop what is only a trail: HUD of the
   // previous frame that left q, and HUD of the current frame whose block is
   // matched with motion (it has not arrived yet).

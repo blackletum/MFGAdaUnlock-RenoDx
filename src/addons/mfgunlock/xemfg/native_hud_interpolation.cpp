@@ -4,6 +4,13 @@
 #include "native_hud_interpolation_ps.h" // fxc /Fh output: g_native_hud_interpolation_ps
 #include "native_hud_layer_cs.h"         // fxc /Fh output: g_native_hud_layer_cs
 #include "native_hud_motion_cs.h"        // fxc /Fh output: g_native_hud_motion_cs
+#include "native_hud_label_cs.h"         // fxc /Fh output: g_native_hud_label_cs
+#include "native_hud_represent_cs.h"     // fxc /Fh output: g_native_hud_represent_cs
+#include "native_hud_score_cs.h"         // fxc /Fh output: g_native_hud_score_cs
+#include "native_hud_min_cs.h"           // fxc /Fh output: g_native_hud_min_cs
+#include "native_hud_elect_cs.h"         // fxc /Fh output: g_native_hud_elect_cs
+#include "native_hud_agree_cs.h"         // fxc /Fh output: g_native_hud_agree_cs
+#include "native_hud_final_cs.h"         // fxc /Fh output: g_native_hud_final_cs
 #include <algorithm>
 #include <cstring>
 #include <iterator>
@@ -60,7 +67,7 @@ bool HudInterpolator::Initialize(ID3D12Device* target,DXGI_FORMAT output) {
   {
     D3D12_DESCRIPTOR_RANGE ranges[2]{};
     ranges[0]={D3D12_DESCRIPTOR_RANGE_TYPE_SRV,3,0,0,0};
-    ranges[1]={D3D12_DESCRIPTOR_RANGE_TYPE_UAV,3,0,0,3};
+    ranges[1]={D3D12_DESCRIPTOR_RANGE_TYPE_UAV,7,0,0,3};
     D3D12_ROOT_PARAMETER parameters[2]{};
     parameters[0].ParameterType=D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
     parameters[0].Constants={0,0,12};
@@ -89,10 +96,21 @@ bool HudInterpolator::Initialize(ID3D12Device* target,DXGI_FORMAT output) {
   compute.pRootSignature=computeRoot.Get();
   compute.CS={g_native_hud_layer_cs,sizeof(g_native_hud_layer_cs)};
   if(FAILED(hr=device->CreateComputePipelineState(&compute,IID_PPV_ARGS(&layerPipeline)))) return Fail(hr);
-  compute.CS={g_native_hud_motion_cs,sizeof(g_native_hud_motion_cs)};
-  if(FAILED(hr=device->CreateComputePipelineState(&compute,IID_PPV_ARGS(&motionPipeline)))) return Fail(hr);
+  const std::pair<D3D12_SHADER_BYTECODE,ComPtr<ID3D12PipelineState>*> passes[]={
+      {{g_native_hud_motion_cs,sizeof(g_native_hud_motion_cs)},&motionPipeline},
+      {{g_native_hud_label_cs,sizeof(g_native_hud_label_cs)},&labelPipeline},
+      {{g_native_hud_represent_cs,sizeof(g_native_hud_represent_cs)},&representPipeline},
+      {{g_native_hud_score_cs,sizeof(g_native_hud_score_cs)},&scorePipeline},
+      {{g_native_hud_min_cs,sizeof(g_native_hud_min_cs)},&minPipeline},
+      {{g_native_hud_elect_cs,sizeof(g_native_hud_elect_cs)},&electPipeline},
+      {{g_native_hud_agree_cs,sizeof(g_native_hud_agree_cs)},&agreePipeline},
+      {{g_native_hud_final_cs,sizeof(g_native_hud_final_cs)},&finalPipeline}};
+  for(const auto& [code,target]:passes) {
+    compute.CS=code;
+    if(FAILED(hr=device->CreateComputePipelineState(&compute,IID_PPV_ARGS(target->GetAddressOf())))) return Fail(hr);
+  }
   D3D12_DESCRIPTOR_HEAP_DESC srv{D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,kComposeSlots*4,D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE,0};
-  D3D12_DESCRIPTOR_HEAP_DESC computeDesc{D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,kSlots*12,D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE,0};
+  D3D12_DESCRIPTOR_HEAP_DESC computeDesc{D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,kSlots*20,D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE,0};
   D3D12_DESCRIPTOR_HEAP_DESC rtv{D3D12_DESCRIPTOR_HEAP_TYPE_RTV,kComposeSlots+1,D3D12_DESCRIPTOR_HEAP_FLAG_NONE,0};
   if(FAILED(hr=device->CreateDescriptorHeap(&srv,IID_PPV_ARGS(&srvHeap)))
       || FAILED(hr=device->CreateDescriptorHeap(&computeDesc,IID_PPV_ARGS(&computeHeap)))
@@ -148,6 +166,10 @@ ID3D12GraphicsCommandList* HudInterpolator::Capture(uint64_t id,ID3D12Resource* 
       || !Ensure(slot.layer,kLayerFormat,width,height,uav,kReadable)
       || !Ensure(slot.motion,kMotionFormat,blocksX,blocksY,uav,kReadable)
       || !Ensure(slot.sceneField,kMotionFormat,blocksX,blocksY,uav,kReadable)
+      || !Ensure(raw,kMotionFormat,blocksX,blocksY,uav,D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
+      || !Ensure(label,DXGI_FORMAT_R32_UINT,blocksX,blocksY,uav,D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
+      || !Ensure(quality,DXGI_FORMAT_R32_UINT,blocksX,blocksY,uav,D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
+      || !Ensure(element,DXGI_FORMAT_R32_UINT,blocksX,blocksY*8,uav,D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
       || !Ensure(emptyUi,format,width,height,D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,kReadable)) return nullptr;
   if(emptyWidth!=width || emptyHeight!=height) { emptyCleared=false; emptyWidth=width; emptyHeight=height; }
   // The HUD's motion needs the previous real frame, captured at this size.
@@ -182,10 +204,10 @@ ID3D12GraphicsCommandList* HudInterpolator::Capture(uint64_t id,ID3D12Resource* 
   // Two descriptor tables per slot: the layer pass and the motion pass. The
   // unused UAV of each pass is a null descriptor.
   const auto cpuBase=[&](uint32_t table) {
-    auto cpu=computeHeap->GetCPUDescriptorHandleForHeapStart(); cpu.ptr+=SIZE_T(captureSlot*12+table*6)*srvSize; return cpu;
+    auto cpu=computeHeap->GetCPUDescriptorHandleForHeapStart(); cpu.ptr+=SIZE_T(captureSlot*20+table*10)*srvSize; return cpu;
   };
   const auto gpuBase=[&](uint32_t table) {
-    auto gpu=computeHeap->GetGPUDescriptorHandleForHeapStart(); gpu.ptr+=UINT64(captureSlot*12+table*6)*srvSize; return gpu;
+    auto gpu=computeHeap->GetGPUDescriptorHandleForHeapStart(); gpu.ptr+=UINT64(captureSlot*20+table*10)*srvSize; return gpu;
   };
   const auto srvAt=[&](D3D12_CPU_DESCRIPTOR_HANDLE cpu,ID3D12Resource* resource,DXGI_FORMAT viewFormat) {
     D3D12_SHADER_RESOURCE_VIEW_DESC view{}; view.Format=viewFormat; view.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D;
@@ -205,6 +227,10 @@ ID3D12GraphicsCommandList* HudInterpolator::Capture(uint64_t id,ID3D12Resource* 
     uavAt(step(cpu,3),slot.layer.Get(),kLayerFormat);
     uavAt(step(cpu,4),nullptr,kMotionFormat);
     uavAt(step(cpu,5),nullptr,kMotionFormat);
+    uavAt(step(cpu,6),nullptr,DXGI_FORMAT_R32_UINT);
+    uavAt(step(cpu,7),nullptr,DXGI_FORMAT_R32_UINT);
+    uavAt(step(cpu,8),nullptr,DXGI_FORMAT_R32_UINT);
+    uavAt(step(cpu,9),nullptr,kMotionFormat);
   }
   // The scene's motion vectors seed the search where they can be read.
   const auto sceneFormat=[](DXGI_FORMAT value) {
@@ -225,8 +251,12 @@ ID3D12GraphicsCommandList* HudInterpolator::Capture(uint64_t id,ID3D12Resource* 
     srvAt(step(cpu,1),previous->layer.Get(),kLayerFormat);
     srvAt(step(cpu,2),seeded?scene.resource:nullptr,seeded?motionView:DXGI_FORMAT_R16G16_FLOAT);
     uavAt(step(cpu,3),nullptr,kLayerFormat);
-    uavAt(step(cpu,4),slot.motion.Get(),kMotionFormat);
+    uavAt(step(cpu,4),raw.Get(),kMotionFormat);
     uavAt(step(cpu,5),slot.sceneField.Get(),kMotionFormat);
+    uavAt(step(cpu,6),label.Get(),DXGI_FORMAT_R32_UINT);
+    uavAt(step(cpu,7),quality.Get(),DXGI_FORMAT_R32_UINT);
+    uavAt(step(cpu,8),element.Get(),DXGI_FORMAT_R32_UINT);
+    uavAt(step(cpu,9),slot.motion.Get(),kMotionFormat);
   }
   ID3D12DescriptorHeap* heaps[]={computeHeap.Get()};
   captureList->SetDescriptorHeaps(1,heaps);
@@ -248,9 +278,23 @@ ID3D12GraphicsCommandList* HudInterpolator::Capture(uint64_t id,ID3D12Resource* 
     if(seeded) Transition(captureList.Get(),scene.resource,scene.state,kReadable);
     Transition(captureList.Get(),slot.motion.Get(),kReadable,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     Transition(captureList.Get(),slot.sceneField.Get(),kReadable,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    captureList->SetPipelineState(motionPipeline.Get());
     captureList->SetComputeRootDescriptorTable(1,gpuBase(1));
-    captureList->Dispatch((blocksX+7)/8,(blocksY+7)/8,1);
+    // Per-element motion: block candidates, element labels, the element's
+    // most confident block, agreement, then one vector per element.
+    D3D12_RESOURCE_BARRIER uavBarrier{}; uavBarrier.Type=D3D12_RESOURCE_BARRIER_TYPE_UAV;
+    const auto run=[&](ID3D12PipelineState* pass) {
+      captureList->SetPipelineState(pass);
+      captureList->Dispatch((blocksX+7)/8,(blocksY+7)/8,1);
+      captureList->ResourceBarrier(1,&uavBarrier);
+    };
+    run(motionPipeline.Get());
+    for(uint32_t step=0;step<kLabelSteps;++step) run(labelPipeline.Get());
+    run(representPipeline.Get());
+    run(scorePipeline.Get());
+    run(minPipeline.Get());
+    run(electPipeline.Get());
+    run(agreePipeline.Get());
+    run(finalPipeline.Get());
     Transition(captureList.Get(),slot.motion.Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS,kReadable);
     Transition(captureList.Get(),slot.sceneField.Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS,kReadable);
     if(seeded) Transition(captureList.Get(),scene.resource,kReadable,scene.state);

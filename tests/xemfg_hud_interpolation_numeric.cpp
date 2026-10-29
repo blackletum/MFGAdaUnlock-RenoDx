@@ -210,11 +210,67 @@ int main() {
         Require(still[size_t(y)*kWidth+x]==(stripes(x,y)?color:scene[0]),"screen-fixed HUD dragged by the scene's motion");
     }
 
+    // A large HUD element (a minimap-like 160x24 panel, 60 blocks) whose
+    // content shifts by 3 px between real frames. Large panels rotate and
+    // scroll in ways one vector cannot follow; they must cross-fade as a
+    // whole, never become a mosaic of moved and unmoved 8x8 blocks.
+    const auto panel=[](unsigned shift) {
+      return [shift](unsigned x,unsigned y) { return x>=16 && x<176 && ((x+shift)/3+y)%4!=0; };
+    };
+    const auto panelColor=Pack(.3f,.6f,.9f);
+    const auto p0=CaptureFrame(gpu,hud,50,0,panel(0),panelColor);
+    const auto p1=CaptureFrame(gpu,hud,51,1,panel(3),panelColor);
+    auto dense=gpu.Texture(scene,kWidth,kHeight,true);
+    Require(hud.Compose(gpu.queue.Get(),dense.Get(),51,0.5f),"compose dense");
+    gpu.Flush();
+    const auto mosaic=gpu.Read(dense.Get());
+    float panelError=0;
+    for(unsigned y=0;y<kHeight;++y) for(unsigned x=16;x<176;++x) {
+      const size_t i=size_t(y)*kWidth+x;
+      for(int ch=0;ch<3;++ch) {
+        const float a0=panel(0)(x,y)?1.f:0.f, a1=panel(3)(x,y)?1.f:0.f, s=Channel(scene[i],ch);
+        const float c=Channel(panelColor,ch);
+        const float expected=.5f*a0*c+.5f*a1*c+(1-.5f*a0-.5f*a1)*s;
+        panelError=std::fmax(panelError,std::fabs(Channel(mosaic[i],ch)-expected));
+      }
+    }
+    Require(panelError<=2.5f/255.f,"dense HUD region did not cross-fade as a whole");
+    (void)p0; (void)p1;
+
+    // A name tag: text-like glyphs (gaps inside the element) spanning
+    // several blocks, moving 13 px. Every glyph moves with the element; at
+    // t = 0.5 the whole tag is 6.5 px along, with no block left behind.
+    const auto tag=[](unsigned x0) {
+      return [x0](unsigned x,unsigned y) { return x>=x0 && x<x0+40 && y>=8 && y<16 && (x-x0)%5<3; };
+    };
+    CaptureFrame(gpu,hud,60,0,tag(60),color);
+    CaptureFrame(gpu,hud,61,1,tag(73),color);
+    auto named=gpu.Texture(scene,kWidth,kHeight,true);
+    Require(hud.Compose(gpu.queue.Get(),named.Get(),61,0.5f),"compose name");
+    gpu.Flush();
+    const auto label=gpu.Read(named.Get());
+    for(unsigned y=9;y<15;++y) for(unsigned x=50;x<130;++x) {
+      // Halfway the tag starts at 66.5; sample whole pixels away from edges.
+      const float local=float(x)+0.5f-66.5f;
+      if(local<0.6f || local>39.4f) {
+        if((local<-1 || local>41) && label[size_t(y)*kWidth+x]!=scene[0]) {
+          std::fprintf(stderr,"row %u:",y);
+          for(unsigned c=50;c<130;++c) std::fprintf(stderr,"%c",label[size_t(y)*kWidth+c]==scene[0]?'.':label[size_t(y)*kWidth+c]==color?'#':'+');
+          std::fprintf(stderr,"\nfirst bad x %u\n",x);
+          throw std::runtime_error("name tag left a block behind");
+        }
+        continue;
+      }
+      const float phase5=std::fmod(local,5.f);
+      if(phase5>0.6f && phase5<2.4f) Require(label[size_t(y)*kWidth+x]==color,"name tag glyph not moved with the tag");
+      if(phase5>3.6f && phase5<4.4f) Require(label[size_t(y)*kWidth+x]==scene[0],"name tag gap filled");
+    }
+
     // An id that was never captured: the generated frame is left as is.
     auto untouched=gpu.Texture(scene,kWidth,kHeight,true);
     Require(!hud.Compose(gpu.queue.Get(),untouched.Get(),99,0.5f),"unknown frame composed");
     Require(gpu.Read(untouched.Get())==scene,"unknown frame changed the output");
-    std::printf("PASS: static HUD cross-faded (max error %.4f), moving HUD drawn halfway without a trail, 100 px world-anchored HUD followed via scene motion, screen-fixed HUD kept while the scene turns, unknown frame untouched\n",worst);
+    std::printf("PASS: static HUD cross-faded (max error %.4f), moving HUD drawn halfway without a trail, 100 px world-anchored HUD followed via scene motion, screen-fixed HUD kept while the scene turns, large HUD cross-faded as a whole, name tag moved as one element, unknown frame untouched\n",worst);
     return 0;
   } catch(const std::exception& e) { std::fprintf(stderr,"%s\n",e.what()); return 1; }
 }

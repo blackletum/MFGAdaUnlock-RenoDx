@@ -32,6 +32,8 @@ class HudInterpolator {
   static constexpr int kSearchRadius=64;
   // Around the scene's own motion: world-anchored HUD moves with the scene.
   static constexpr int kSceneRadius=12;
+  // Label propagation steps: enough for every element motion is allowed for.
+  static constexpr uint32_t kLabelSteps=24;
   static bool SupportedFormat(DXGI_FORMAT format);
   bool Initialize(ID3D12Device* device,DXGI_FORMAT format);
   // Source side. `clean` is the game's HUD-less color (region `area`), equal
@@ -71,7 +73,10 @@ class HudInterpolator {
   mutable std::mutex lock;
   Microsoft::WRL::ComPtr<ID3D12Device> device;
   Microsoft::WRL::ComPtr<ID3D12RootSignature> root, computeRoot;
-  Microsoft::WRL::ComPtr<ID3D12PipelineState> pipeline, layerPipeline, motionPipeline;
+  Microsoft::WRL::ComPtr<ID3D12PipelineState> pipeline, layerPipeline, motionPipeline, labelPipeline,
+      representPipeline, scorePipeline, minPipeline, electPipeline, agreePipeline, finalPipeline;
+  // Per-element motion scratch, shared by all captures (block grid).
+  Microsoft::WRL::ComPtr<ID3D12Resource> raw, label, quality, element;
   Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> srvHeap, rtvHeap, computeHeap;
   // Capture: own allocators/list on the source queue.
   Microsoft::WRL::ComPtr<ID3D12CommandAllocator> captureAllocators[kSlots];

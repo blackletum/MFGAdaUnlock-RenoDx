@@ -67,11 +67,11 @@ foreach(stage IN ITEMS vs ps)
     DEPENDS native_hud_interpolation.hlsl VERBATIM)
 endforeach()
 # 1.7 (plan I.7): HUD layer and HUD motion for HUD interpolation.
-foreach(entry IN ITEMS layer motion)
-  set(XEMFG_ENTRY LayerCS)
-  if(entry STREQUAL "motion")
-    set(XEMFG_ENTRY MotionCS)
-  endif()
+foreach(entry IN ITEMS layer motion label represent score min elect agree final)
+  string(SUBSTRING "${entry}" 0 1 XEMFG_FIRST)
+  string(TOUPPER "${XEMFG_FIRST}" XEMFG_FIRST)
+  string(SUBSTRING "${entry}" 1 -1 XEMFG_REST)
+  set(XEMFG_ENTRY "${XEMFG_FIRST}${XEMFG_REST}CS")
   add_custom_command(OUTPUT "${XEMFG_SHADER_HEADERS}/native_hud_${entry}_cs.h"
     COMMAND "${CMAKE_COMMAND}" -E make_directory "${XEMFG_SHADER_HEADERS}"
     COMMAND "${XEMFG_FXC}" /nologo /T cs_5_0 /E ${XEMFG_ENTRY} /O3 /Vn g_native_hud_${entry}_cs
@@ -102,6 +102,10 @@ set(XEMFG_GPU_PASS_SOURCES native_dejitter.cpp native_hud_copy.cpp "${XEMFG_SHAD
   native_hud_interpolation.cpp "${XEMFG_SHADER_HEADERS}/native_hud_interpolation_vs.h"
   "${XEMFG_SHADER_HEADERS}/native_hud_interpolation_ps.h"
   "${XEMFG_SHADER_HEADERS}/native_hud_layer_cs.h" "${XEMFG_SHADER_HEADERS}/native_hud_motion_cs.h"
+  "${XEMFG_SHADER_HEADERS}/native_hud_label_cs.h" "${XEMFG_SHADER_HEADERS}/native_hud_represent_cs.h"
+  "${XEMFG_SHADER_HEADERS}/native_hud_score_cs.h" "${XEMFG_SHADER_HEADERS}/native_hud_min_cs.h"
+  "${XEMFG_SHADER_HEADERS}/native_hud_elect_cs.h" "${XEMFG_SHADER_HEADERS}/native_hud_agree_cs.h"
+  "${XEMFG_SHADER_HEADERS}/native_hud_final_cs.h"
   native_scrgb.cpp "${XEMFG_SHADER_HEADERS}/native_scrgb_vs.h" "${XEMFG_SHADER_HEADERS}/native_scrgb_ps.h")
 
 add_library(mfgunlock_native_xemfg SHARED ../addon.cpp ${XEMFG_MODEL_SOURCES}
