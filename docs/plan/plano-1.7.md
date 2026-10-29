@@ -145,6 +145,21 @@ Só depois do A–E. O suporte a DX11 (ponte DX11→DX12) saiu deste plano e fic
 | G.1 | Levantar o que o NVAPI expõe para pacing de apresentação (além do Reflex) e se o flip metering da RTX 50 tem acesso fora do DLSS-G | 2 h | pendente |
 | G.2 | Se houver caminho: protótipo opcional, medido com PresentMon (desvio entre frames); senão, encerrar com o registro | 2 h | pendente |
 
+## Bloco I — Interpolação própria da HUD (XeMFG)
+
+Pedido no campo (2026-10-29): a HUD stabilization deixa a HUD estável, mas no ritmo dos frames reais, como o UI Composition. A XeFG aceita uma só imagem de UI por frame real e a repete em todos os frames gerados, sem API para interpolar a HUD à parte. A saída é desenhar a HUD nós mesmos em cada frame gerado.
+
+Desenho: a XeFG interpola só a cena limpa (a HUD-less do jogo, com uma UI vazia), então os frames gerados saem sem HUD. Para cada frame real o addon guarda a camada de HUD (cópia do back buffer e HUD-less). No `FinalOutput::Present`, que roda em toda saída da XeFG, o hook do Present nativo do `sdk_pacing` informa se o frame é gerado e de qual lote; o addon desenha a HUD na fase *t* do intervalo como transição suave entre a HUD do frame real anterior e a do atual. Nunca deforma (não usa os vetores da cena) e muda em todo frame. Limite: HUD que muda de lugar vira esmaecimento entre as duas posições, não deslocamento. Exige HUD-less do jogo.
+
+| # | Tarefa | Est. | Status |
+|---|---|---|---|
+| I.1 | `sdk_pacing`: publicar para a thread do Present nativo se a saída é gerada, o id do lote, o índice e o total | 2 h | pendente |
+| I.2 | Anel de camadas de HUD por frame real (cópia do back buffer e HUD-less), indexado pelo id | 2 h | pendente |
+| I.3 | Passe de composição no back buffer nativo (pixel shader com blend pré-multiplicado, por formato) e entradas da XeFG (HUD-less do jogo + UI vazia) | 4 h | pendente |
+| I.4 | Painel: modo "HUD interpolation (experimental)" ao lado da stabilization | 1 h | pendente |
+| I.5 | Testes: composição numérica em WARP (fase *t*, HUD só no anterior, só no atual, nos dois) | 2 h | pendente |
+| I.6 | **[você]** Campo: Cyberpunk e DD2 | 1 h | pendente |
+
 ## Bloco H — `dlssg_for_sm86`
 
 | # | Tarefa | Est. | Status |
@@ -158,8 +173,7 @@ Só depois do A–E. O suporte a DX11 (ponte DX11→DX12) saiu deste plano e fic
 
 | Versão | Conteúdo | Condição |
 |---|---|---|
-| 1.7.0 | A, B, C (C.3/C.4 como opção experimental desligada), E.2 (opção experimental desligada), H.1 | gate completo, campo do B e do E, e o C.5 com o tester RTX 50 |
-| Plano próprio | D (SR→G), F (Vulkan), G se der caminho | resultado do protótipo |
+| 1.7.0 | O plano inteiro: A–I (D, F e G incluídos), com as opções novas experimentais desligadas por padrão | gate completo, campo de cada bloco e o C.5 com o tester RTX 50 |
 
 Cada release segue o processo de sempre: versão em todos os pontos (incluindo `addon_overlay.inl` e a versão numérica do recurso), notas, `fork/main` e `develop` adiantados, tag e release com o addon.
 
@@ -194,3 +208,4 @@ Cada release segue o processo de sempre: versão em todos os pontos (incluindo `
 - **2026-10-29 · E** A API da XeFG já tem o modo que o E.1 previa (interpolar a HUD-less e extrair a UI do back buffer): é o UI Composition existente, para jogos que entregam HUD-less. O flicker que sobra é o de jogos sem HUD-less. E.2: `[XeFG] UIStabilization` (experimental, desligado): a cada frame real, um passe próprio na fila de apresentação copia o back buffer como HUD-less e gera uma textura de UI com os pixels que ficaram iguais por 4 frames reais (tolerância 2/255, 1 pixel de dilatação para as bordas dos textos); a XeFG compõe essa HUD do frame real sobre os gerados. A HUD-less do jogo sempre tem prioridade. Painel: caixa "HUD stabilization (experimental)" e o estado em "HUD handling". Testes: `xemfg_ui_mask_numeric` (WARP: HUD composta depois de 4 frames, cena transparente, HUD-less exata, histórico reinicia ao mudar o tamanho) e `xemfg_ui_composition` (composição sem a preferência do UI Composition, e desliga quando as entradas somem).
 - **2026-10-29 · gate** B, C, E e H.1 juntos: 197/197 (3 skipped de proveniência).
 - **2026-10-29 · G.0, leitura** A flip queue do dashdogy (`sdk_pacing_meter.h`, v1.6.1–1.7.0) é um "jitter buffer": cada lote é entregue cedo numa fila de cerca de um lote e um relógio próprio libera cada flip, com várias correções de campo (hitch, lock-in, coupled decay). É um sistema grande (o `sdk_pacing.cpp` deles tem 134 KB, o nosso 54 KB); portar fica para o plano próprio do G, com PresentMon antes e depois.
+- **2026-10-29 · escopo** A pedido, a 1.7 só sai com o plano inteiro (D, F Vulkan, G pacing) e com o bloco I novo (interpolação própria da HUD): uma atualização maior. Campo da E.2: no Cyberpunk e no DD2 a HUD fica estável, mas no ritmo dos frames reais; versão com cobertura exata pela HUD-less (`04379e1`).
