@@ -20,6 +20,9 @@ struct ControlSettings {
   // 1.7 (plan E.2): without HUD-less color from the game, compose unchanged
   // back-buffer pixels as UI (off by default).
   bool uiStabilization{};
+  // 1.7 (plan I): with the game's HUD-less color, XeFG interpolates only the
+  // scene and the addon draws the HUD on each generated frame (off by default).
+  bool uiInterpolation{};
 };
 struct ControlStatus {
   uint32_t version{5};
@@ -32,7 +35,8 @@ struct ControlStatus {
   bool uiCompositionAvailable{}, uiCompositionApplied{}, uiCompositionKnown{};
   int uiCompositionResult{};
   uint64_t uiCompositionUpdates{};
-  bool uiStabilized{};
+  bool uiStabilized{}, uiInterpolated{};
+  uint64_t hudComposed{}, hudMissing{};
   bool modelPort{}, modelInitialized{}, modelUpdating{}, cudaUpdating{}, settingsSaved{true},invalidConfiguration{};
   uint32_t cudaState{}, cudaLayers{};
   int cudaMajor{}, cudaMinor{};

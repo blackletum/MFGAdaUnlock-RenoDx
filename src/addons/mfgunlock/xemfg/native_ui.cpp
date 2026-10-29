@@ -8,7 +8,7 @@ bool ApplyUiComposition(Output& output,bool hudlessAvailable,bool stabilized) {
   // Stabilized frames carry the addon's own HUD-less and UI inputs; they are
   // not the game's HUD-less color, so UI Composition stays a game-input option.
   output.uiCompositionAvailable=hudlessAvailable && !stabilized;
-  output.uiStabilized=stabilized;
+  output.uiStabilized=stabilized && !output.uiInterpolated;
   const bool requested=ControlsSettings().uiComposition;
   const bool desired=stabilized || (requested && hudlessAvailable);
   if(output.uiCompositionKnown && output.uiCompositionApplied==desired) return true;
@@ -73,6 +73,59 @@ bool StabilizeHud(Output& o,Frame& frame,uint32_t id) {
         +",\"hudless_tag\":"+std::to_string(tags[0])+",\"ui_tag\":"+std::to_string(tags[1])
         +",\"reference\":"+(o.uiMask->UsedReference()?"true":"false")
         +",\"hr\":"+std::to_string(int32_t(o.uiMask->LastError())));
+  }
+  return ok;
+}
+bool CaptureHudInterpolation(Output& o,Frame& frame,uint32_t id) {
+  const auto& held=frame.heldHudless;
+  if(o.hudInterpFailed || !held.source || !HudInterpolator::SupportedFormat(o.format)) return false;
+  if(!o.hudInterp) {
+    auto value=std::make_unique<HudInterpolator>();
+    if(!value->Initialize(o.device.Get(),o.format)) {
+      o.hudInterpFailed=true;
+      xess_mod::WriteLog("native_hud_interpolation","\"initialized\":false,\"format\":"+std::to_string(uint32_t(o.format))
+          +",\"hr\":"+std::to_string(int32_t(value->LastError())));
+      return false;
+    }
+    o.hudInterp=std::move(value);
+  }
+  auto& a=State().api;
+  ComPtr<IDXGISwapChain4> chain;
+  ComPtr<ID3D12Resource> backbuffer;
+  if(a.xefgSwapChainD3D12GetSwapChainPtr(o.fg,IID_PPV_ARGS(&chain))!=0
+      || FAILED(chain->GetBuffer(chain->GetCurrentBackBufferIndex(),IID_PPV_ARGS(&backbuffer)))) return false;
+  ID3D12Resource* hudless{}; ID3D12Resource* ui{};
+  auto* list=o.hudInterp->Capture(id,backbuffer.Get(),D3D12_RESOURCE_STATE_PRESENT,held.source.Get(),held.state,held.region,
+      &hudless,&ui);
+  int tags[2]{XEFG_SWAPCHAIN_RESULT_ERROR_INVALID_ARGUMENT,XEFG_SWAPCHAIN_RESULT_ERROR_INVALID_ARGUMENT};
+  bool ok=false;
+  if(list) {
+    const xefg_swapchain_resource_type_t types[2]{XEFG_SWAPCHAIN_RES_HUDLESS_COLOR,XEFG_SWAPCHAIN_RES_UI};
+    ID3D12Resource* resources[2]{hudless,ui};
+    const auto desc=backbuffer->GetDesc();
+    for(int i=0;i<2;++i) {
+      xefg_swapchain_d3d12_resource_data_t data{};
+      data.type=types[i]; data.pResource=resources[i]; data.validity=XEFG_SWAPCHAIN_RV_UNTIL_NEXT_PRESENT;
+      data.incomingState=D3D12_RESOURCE_STATES(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE|D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+      data.resourceSize={uint32_t(desc.Width),desc.Height};
+      if(o.backbufferRegion.width) {
+        data.resourceBase={o.backbufferRegion.x,o.backbufferRegion.y};
+        data.resourceSize={o.backbufferRegion.width,o.backbufferRegion.height};
+      }
+      RuntimeCall trace("xefg_tag_resource",o.diagnosticOutput,id);
+      tags[i]=a.xefgSwapChainD3D12TagFrameResource(o.fg,list,id,&data); trace.Result(tags[i]);
+    }
+    ok=o.hudInterp->SubmitCapture(o.queue.Get()) && tags[0]>=0 && tags[1]>=0; // the open list is always submitted
+  }
+  o.uiInterpolated=ok;
+  if(o.hudInterpLogBudget<4 || (!ok && o.hudInterpLogBudget<12)) {
+    ++o.hudInterpLogBudget;
+    const auto counters=o.hudInterp->Snapshot();
+    xess_mod::WriteLog("native_hud_interpolation","\"id\":"+std::to_string(id)+",\"ok\":"+(ok?"true":"false")
+        +",\"hudless_tag\":"+std::to_string(tags[0])+",\"ui_tag\":"+std::to_string(tags[1])
+        +",\"composed\":"+std::to_string(counters.composed)+",\"missing\":"+std::to_string(counters.missing)
+        +",\"previous_missing\":"+std::to_string(counters.previousMissing)
+        +",\"hr\":"+std::to_string(int32_t(o.hudInterp->LastError())));
   }
   return ok;
 }

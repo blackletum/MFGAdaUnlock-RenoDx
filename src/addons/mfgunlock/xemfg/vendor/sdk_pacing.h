@@ -59,4 +59,11 @@ struct FlipStatus {
 };
 // Read only, scoped to the exact live SDK handle (never another context).
 FlipStatus Snapshot(void* handle) noexcept;
+// 1.7 (plan I.1): the XeFG output the calling thread is presenting, valid only
+// inside the provider's native Present (the wrapped final swap chain's Present
+// runs there). index counts the batch's generated outputs from 0.
+// site: 1 the batch's first generated output, 2 a later one, 3 the real frame,
+// 0 another call site.
+struct PresentedOutput { bool active{}, generated{}; uint64_t frame{}; uint32_t index{}, site{}; };
+PresentedOutput CurrentOutput() noexcept;
 }

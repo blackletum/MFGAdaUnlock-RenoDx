@@ -495,9 +495,19 @@ void FlipBeforePresent(Route& current, const Invocation& call)
     }
 }
 
+thread_local PresentedOutput presentedOutput{};
+thread_local bool previousGenerated{};
+thread_local uint32_t generatedIndex{};
+
 HRESULT Dispatch(Route& current, const Invocation& call)
 {
     const DWORD incomingError = GetLastError();
+    // 1.7 (plan I.1): a batch's first generated output returns to kFirstReturn;
+    // the presenter's outputs are serial, so later generated ones count up.
+    if (call.generated)
+        generatedIndex = call.returnAddress == uintptr_t(current.module)+kFirstReturn || !previousGenerated
+            ? 0 : generatedIndex+1;
+    previousGenerated = call.generated;
     if(current.enabled.load(std::memory_order_acquire) && call.generated
         && call.returnAddress==uintptr_t(current.module)+kFirstReturn) {
         const bool wanted=sdkDeadlinesRequested.load(std::memory_order_acquire);
@@ -562,6 +572,18 @@ HRESULT Dispatch(Route& current, const Invocation& call)
 #if defined(MFGUNLOCK_NATIVE_XEMFG)
     mfgunlock::xemfg::native::RuntimeCall trace("xefg_presenter",0,call.frame);
 #endif
+    struct Published
+    {
+        Published(const Route& current, const Invocation& call) noexcept
+        {
+            const auto module = current.module;
+            const uint32_t site = call.returnAddress == uintptr_t(module)+kFirstReturn ? 1u
+                : call.returnAddress == uintptr_t(module)+kExtraReturn ? 2u
+                : call.returnAddress == uintptr_t(module)+kRealReturn ? 3u : 0u;
+            presentedOutput = {true, call.generated, call.frame, call.generated ? generatedIndex : 0, site};
+        }
+        ~Published() { presentedOutput = {}; }
+    } published(current, call);
     return current.original(call.presenter, call.sync, call.flags, call.frame, call.parameters, call.resource, call.generated);
 }
 
@@ -780,6 +802,8 @@ bool HookPointsTo(unsigned char* target, uintptr_t hook) noexcept
 }
 bool HookPointsToUs(unsigned char* target) noexcept { return HookPointsTo(target, uintptr_t(&HookPresent)); }
 }
+
+PresentedOutput CurrentOutput() noexcept { return presentedOutput; }
 
 bool Install(HMODULE provider, std::string& failure) noexcept
 {

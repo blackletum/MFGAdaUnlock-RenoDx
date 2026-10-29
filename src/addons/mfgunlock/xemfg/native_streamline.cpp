@@ -845,8 +845,14 @@ void BeforePresent(const std::shared_ptr<Output>& o) {
       && (frame->resources&(1u<<XEFG_SWAPCHAIN_RES_HUDLESS_COLOR));
   // 1.7 (plan E.2): with HUD stabilization on, the game's HUD tags were held
   // back (SubmitResource), so `hudless` is false and the addon's inputs apply.
-  const bool stabilized=!hudless && frame && !frame->failed && ControlsSettings().uiStabilization
-      && StabilizeHud(*o,*frame,id);
+  const auto controls=ControlsSettings();
+  // 1.7 (plan I): HUD interpolation first (needs the game's HUD-less, held
+  // back by SubmitResource), then HUD stabilization.
+  const bool interpolated=!hudless && frame && !frame->failed && controls.uiInterpolation
+      && CaptureHudInterpolation(*o,*frame,id);
+  if(!interpolated) o->uiInterpolated=false;
+  const bool stabilized=interpolated || (!hudless && frame && !frame->failed && controls.uiStabilization
+      && StabilizeHud(*o,*frame,id));
   const bool compositionReady=ApplyUiComposition(*o,hudless || stabilized,stabilized);
   constexpr uint32_t required=(1u<<XEFG_SWAPCHAIN_RES_DEPTH)|(1u<<XEFG_SWAPCHAIN_RES_MOTION_VECTOR);
   const bool nativeReflex=s.latencyOutput.load()==LatencyOutput::Reflex;
