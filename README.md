@@ -1551,6 +1551,15 @@ as `renodx-mfgunlock.addon64`). Configure `tests/CMakeLists.txt` with:
 The motion-vector dejitter and scRGB passes are compiled with `fxc` from the
 Windows SDK during the build.
 
+The Vulkan path (1.7) is built in only when two local inputs exist:
+`XEMFG_VULKAN_HEADERS`, the Khronos Vulkan-Headers include directory (1.3 or
+later; `vulkan-sdk-1.4.350.1` was used), and `XEMFG_XVK_PROGRAMS`, the folder
+written by `python -I tools/extract_xvk_programs.py <MFGUnlocker.dll> <folder>`
+from your own copy of dashdogy's MFG Unlocker 1.7.0 release DLL (its SHA-256 is
+checked; the DLL is read, never loaded). The SPIR-V it extracts derives from
+Intel's programs and is never committed. Without them the addon builds without
+the Vulkan path.
+
 The gate is `ctest -C Release`. It runs:
 
 - the unit and numeric tests (dejitter and scRGB on a WARP device);
