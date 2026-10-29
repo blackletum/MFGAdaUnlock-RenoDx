@@ -153,12 +153,12 @@ Desenho: a XeFG interpola só a cena limpa (a HUD-less do jogo, com uma UI vazia
 
 | # | Tarefa | Est. | Status |
 |---|---|---|---|
-| I.1 | `sdk_pacing`: publicar para a thread do Present nativo se a saída é gerada, o id do lote, o índice e o total | 2 h | pendente |
-| I.2 | Anel de camadas de HUD por frame real (cópia do back buffer e HUD-less), indexado pelo id | 2 h | pendente |
-| I.3 | Passe de composição no back buffer nativo (pixel shader com blend pré-multiplicado, por formato) e entradas da XeFG (HUD-less do jogo + UI vazia) | 4 h | pendente |
-| I.4 | Painel: modo "HUD interpolation (experimental)" ao lado da stabilization | 1 h | pendente |
-| I.5 | Testes: composição numérica em WARP (fase *t*, HUD só no anterior, só no atual, nos dois) | 2 h | pendente |
-| I.6 | **[você]** Campo: Cyberpunk e DD2 | 1 h | pendente |
+| I.1 | `sdk_pacing`: publicar para a thread do Present nativo se a saída é gerada, o id do lote, o índice e o total | 2 h | feito |
+| I.2 | Anel de camadas de HUD por frame real (cópia do back buffer e HUD-less), indexado pelo id | 2 h | feito |
+| I.3 | Passe de composição no back buffer nativo (pixel shader com blend pré-multiplicado, por formato) e entradas da XeFG (HUD-less do jogo + UI vazia) | 4 h | feito |
+| I.4 | Painel: modo "HUD interpolation (experimental)" ao lado da stabilization | 1 h | feito |
+| I.5 | Testes: composição numérica em WARP (fase *t*, HUD só no anterior, só no atual, nos dois) | 2 h | feito |
+| I.6 | **[você]** Campo: Cyberpunk e DD2 | 1 h | pausado (resultado não satisfez no campo) |
 
 ## Bloco H — `dlssg_for_sm86`
 
@@ -209,3 +209,4 @@ Cada release segue o processo de sempre: versão em todos os pontos (incluindo `
 - **2026-10-29 · gate** B, C, E e H.1 juntos: 197/197 (3 skipped de proveniência).
 - **2026-10-29 · G.0, leitura** A flip queue do dashdogy (`sdk_pacing_meter.h`, v1.6.1–1.7.0) é um "jitter buffer": cada lote é entregue cedo numa fila de cerca de um lote e um relógio próprio libera cada flip, com várias correções de campo (hitch, lock-in, coupled decay). É um sistema grande (o `sdk_pacing.cpp` deles tem 134 KB, o nosso 54 KB); portar fica para o plano próprio do G, com PresentMon antes e depois.
 - **2026-10-29 · escopo** A pedido, a 1.7 só sai com o plano inteiro (D, F Vulkan, G pacing) e com o bloco I novo (interpolação própria da HUD): uma atualização maior. Campo da E.2: no Cyberpunk e no DD2 a HUD fica estável, mas no ritmo dos frames reais; versão com cobertura exata pela HUD-less (`04379e1`).
+- **2026-10-29 · bloco I, campo e pausa** Evolução no campo (DD2, Cyberpunk): o id do frame da XeFG traz o nosso id nos 32 bits altos (a 1ª versão não compunha nada); transição pura funcionou mas parecia ritmo de frames reais; movimento por blocos de 8x8 (busca ±24 e depois ±64 px, pista pelos vetores do jogo para HUD presa ao mundo) gerou textos voando e mosaico; checagem de consistência e confiança reduziram, sem resolver; versão por elemento (rotulagem de componentes na grade de blocos, um vetor por elemento escolhido pelo custo do elemento inteiro, elementos grandes só com transição, `098eb86`) passa todos os testes WARP mas o resultado no jogo não ficou bom. Decisão: pausar o I, seguir com D, F e G; a opção `[XeFG] UIInterpolation` fica desligada por padrão e, antes do release, decidir se aparece no painel. A HUD stabilization (E.2) segue como está.
