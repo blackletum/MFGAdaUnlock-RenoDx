@@ -395,13 +395,17 @@ __declspec(noinline) Result InitDesc(Handle h,HWND w,const DXGI_SWAP_CHAIN_DESC1
   GameInitScope scope(GameOwned(h));
   return Initialize(h,[&] {
     // 1.7 (plan J): with the flip queue on, XeFG's native swap chain gets the
-    // queue's back buffers (sdk_pacing.h NativeBuffersScope).
-    const auto queue=ConfigureFlipQueue();
+    // queue's back buffers. The native build hands XeFG its own factory
+    // (native_factory.cpp OutputFactory), which raises the count itself;
+    // upstream's NativeBuffersScope only accepts DXGI's own factory table.
     std::optional<sdk_pacing::NativeBuffersScope> buffers;
+#ifndef MFGUNLOCK_NATIVE_XEMFG
+    const auto queue=ConfigureFlipQueue();
     if(queue.enabled && queue.buffers>=2 && factory) {
       buffers.emplace(factory,fg,queue.buffers);
       if(buffers->Reason()) xess_mod::WriteLog("native_buffers_scope","\"applied\":false,\"reason\":\""+std::string(buffers->Reason())+"\"");
     }
+#endif
     return original_xefgSwapChainD3D12InitFromSwapChainDesc(h,w,d,f,q,factory,params);
   });
 }
@@ -767,6 +771,7 @@ bool RuntimeFilesRejected(RuntimeFileReport (&out)[2]) noexcept {
 void SetGameMultiplier(uint32_t multiplier) noexcept { userGenerated=multiplier>=2 && multiplier<=6?multiplier-1:0; }
 bool GameContextInitializing() noexcept { return gameInitializing || gameInits.load()>0; }
 bool GameOwnsFrameGeneration() noexcept { return GameContextInitializing() || gameContexts.load()>0; }
+uint32_t FlipQueueNativeBuffers() noexcept { return ConfigureFlipQueue().buffers; }
 void AttachModel(HMODULE module) {
   self=module;
   InitializeASI();
