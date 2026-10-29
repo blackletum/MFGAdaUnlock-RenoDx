@@ -8,7 +8,8 @@
 // MotionCS: one thread per 8x8 block of the current HUD layer. Blocks without
 // HUD keep zero motion. Others search the previous layer for the best match
 // (sum of absolute differences over rgb and coverage): a coarse search with
-// step 2 over +-radius on a 4x4 subsample, then a full 8x8 refinement of +-2.
+// step 4 over +-radius on a 4x4 subsample, then full 8x8 refinements of +-2
+// (step 2) and +-1. World-anchored markers move far between real frames.
 // Zero motion wins unless a displacement is clearly better, so static HUD
 // over a changing scene never jitters. The result is the offset from the
 // current block to where it was in the previous frame.
@@ -53,8 +54,8 @@ void MotionCS(uint3 id : SV_DispatchThreadID) {
 
   float best = 1e30;
   int2 bestOffset = int2(0, 0);
-  [loop] for (int y = -radius; y <= radius; y += 2) {
-    [loop] for (int x = -radius; x <= radius; x += 2) {
+  [loop] for (int y = -radius; y <= radius; y += 4) {
+    [loop] for (int x = -radius; x <= radius; x += 4) {
       float sad = 0;
       [unroll] for (int s = 0; s < 16; ++s) {
         const int2 q = origin + int2((s & 3) * 2, (s >> 2) * 2);
@@ -66,15 +67,19 @@ void MotionCS(uint3 id : SV_DispatchThreadID) {
   float refined = 1e30;
   int2 refinedOffset = bestOffset;
   float zero = 0;
-  [loop] for (int ry = -2; ry <= 2; ++ry) {
-    [loop] for (int rx = -2; rx <= 2; ++rx) {
-      const int2 offset = bestOffset + int2(rx, ry);
-      float sad = 0;
-      [loop] for (int p = 0; p < 64; ++p) {
-        const int2 q = origin + int2(p & 7, p >> 3);
-        sad += Cost(Fetch(InputA, q), Fetch(InputB, q + offset));
+  [loop] for (int level = 0; level < 2; ++level) {
+    const int stride = level == 0 ? 2 : 1;
+    const int2 center = refinedOffset;
+    [loop] for (int ry = -1; ry <= 1; ++ry) {
+      [loop] for (int rx = -1; rx <= 1; ++rx) {
+        const int2 offset = center + int2(rx, ry) * stride;
+        float sad = 0;
+        [loop] for (int p = 0; p < 64; ++p) {
+          const int2 q = origin + int2(p & 7, p >> 3);
+          sad += Cost(Fetch(InputA, q), Fetch(InputB, q + offset));
+        }
+        if (sad < refined) { refined = sad; refinedOffset = offset; }
       }
-      if (sad < refined) { refined = sad; refinedOffset = offset; }
     }
   }
   [loop] for (int z = 0; z < 64; ++z) {

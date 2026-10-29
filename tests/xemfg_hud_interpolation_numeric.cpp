@@ -93,15 +93,15 @@ struct Gpu {
     return out;
   }
 };
-constexpr unsigned kWidth=96, kHeight=24;
+constexpr unsigned kWidth=192, kHeight=24;
 uint32_t Pack(float r,float g,float b) {
   const auto c=[](float v){ return uint32_t(std::lround(std::fmin(std::fmax(v,0.f),1.f)*255.f)); };
   return 0xFF000000u|c(r)|(c(g)<<8)|(c(b)<<16);
 }
 float Channel(uint32_t v,int i) { return float((v>>(8*i))&0xFF)/255.f; }
 // Static regions, farther apart than the motion search radius:
-// x in [24,32) HUD in both frames; [0,8) only frame 0; [64,72) only frame 1.
-int Region(unsigned x) { return x>=24 && x<32 ? 3 : x<8 ? 1 : x>=64 && x<72 ? 2 : 0; }
+// x in [24,32) HUD in both frames; [0,8) only frame 0; [144,152) only frame 1.
+int Region(unsigned x) { return x>=24 && x<32 ? 3 : x<8 ? 1 : x>=144 && x<152 ? 2 : 0; }
 uint32_t Clean(unsigned x,unsigned y,unsigned frame) { return Pack(.1f+.02f*float(x%7),.2f+.03f*float(y%5),.3f+.1f*float(frame)); }
 uint32_t Hud(unsigned frame) { return frame?Pack(.9f,.8f,.1f):Pack(.7f,.95f,.2f); }
 struct Captured { std::vector<uint32_t> back, clean; };

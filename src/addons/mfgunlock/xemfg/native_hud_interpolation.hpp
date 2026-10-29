@@ -29,7 +29,7 @@ class HudInterpolator {
   // Full coverage just above the tolerance: every HUD pixel, also thin and
   // semi-transparent ones, is drawn as opaque as in the real frame.
   static constexpr float kRamp=128.0f;
-  static constexpr int kSearchRadius=24;
+  static constexpr int kSearchRadius=64;
   static bool SupportedFormat(DXGI_FORMAT format);
   bool Initialize(ID3D12Device* device,DXGI_FORMAT format);
   // Source side. `clean` is the game's HUD-less color (region `area`), equal
