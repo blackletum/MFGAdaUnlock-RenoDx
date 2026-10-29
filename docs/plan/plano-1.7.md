@@ -70,19 +70,20 @@ Já estava previsto no fechamento da 1.6 ("plano próprio"). O XeMFG já tem um 
 | 0.1 | Partir do log 1.4.4 da 5070 Ti: o código de arch gate e dos slots das correções não mudou até a 1.6.0 (não há checagem de arquitetura da GPU), então as conclusões valem. O log com a 1.6 vem com o tester do C.5, sem bloquear | conclusões do log válidas para a 1.6 | — | feito |
 | 0.2 | Ler um provedor 310.9.16: existem slots sm_120 para os três kernels das correções? Com que tamanho? | viabilidade do bloco C | 2 h | pendente |
 | 0.3 | Reflex: logar o modo **aplicado** (`slReflexGetState` / `NvAPI_D3D_GetSleepStatus`) depois de cada troca, e se a troca do painel ficou pendente | separa as hipóteses 1, 2 e 3 | 2 h | pendente |
-| 0.4 | **[você]** Reflex: PresentMon 30 s em 1 jogo (Witcher 3 ou Cyberpunk) com Jogo / Off / On / On + Boost | diferença real de latência entre os modos | 1 h | pendente |
+| 0.4 | **[você]** Reflex: PresentMon 30 s em 1 jogo (Witcher 3 ou Cyberpunk) com Jogo / Off / On / On + Boost | diferença real de latência entre os modos | 1 h | feito (Cyberpunk: os quatro empatam) |
 | 0.5 | XeFG no Vulkan: o SDK da Intel continua só D3D12; o dashdogy resolveu com uma camada D3D12-sobre-Vulkan (`xvk`, v1.7.0, MIT) | decide o bloco F (portar o `xvk`) | 30 min | feito |
 | 0.6 | Medir o flicker atual (captura com UI Composition desligada, 2 jogos) e o que o `native_hud_copy` cobre | base do bloco E | 1,5 h | pendente |
 
 ---
 
-## Bloco A — Force Borderless fora do painel (DLSS-G)
+## Bloco A — Painel do DLSS-G
 
 | # | Tarefa | Est. | Status |
 |---|---|---|---|
-| A.1 | Retirar a linha "Force Borderless" do painel (`dlssg_display.hpp`); o estado do modo de tela continua visível só como leitura | 30 min | pendente |
+| A.1 | Retirar a linha "Force Borderless" do painel (`dlssg_display.hpp`); o estado do modo de tela continua visível só como leitura | 30 min | feito |
 | A.2 | A chave `[DLSSG] ForceBorderless` e o código do hook de janela continuam; quem já tem `1` no INI segue com o comportamento atual (decisão: só sai do painel) | — | descartado (decisão) |
-| A.3 | README: a chave passa a ser só do INI; testes do hook continuam valendo | 30 min | pendente |
+| A.3 | README: a chave passa a ser só do INI; testes do hook continuam valendo | 30 min | feito |
+| A.4 | Multiplicador do destaque com o Dynamic MFG: voltar a mostrar "ao vivo / máximo" (ex.: 3x / 6x), perdido no redesenho do painel (`8fe4cc9`) | 30 min | feito |
 
 ## Bloco B — Reflex Off / On + Boost (DLSS-G)
 
@@ -90,9 +91,9 @@ Depende do 0.3 e do 0.4.
 
 | # | Tarefa | Est. | Status |
 |---|---|---|---|
-| B.1 | Painel: mostrar o modo **aplicado pelo driver**, não só o enviado; explicar que o "Off" mantém o Reflex do Streamline ligado e só tira a espera | 1,5 h | pendente |
+| B.1 | Painel: explicar que o "Off" mantém o Reflex do Streamline ligado e só tira a espera, e que com o Frame Generation ligado Off e Boost geralmente não mudam a latência (o Boost só ajuda com a CPU como gargalo); mostrar o modo aplicado quando houver leitura | 1,5 h | pendente |
 | B.2 | Troca no painel sem nova chamada do jogo: reenviar as opções no próximo `slReflexSleep`/Present da thread dona (o mesmo ponto seguro que já existe para o limite de FPS) | 2 h | pendente |
-| B.3 | Se o Boost for ignorado com o FG ligado: marcar a opção como "sem efeito com o Frame Generation" em vez de prometer algo | 1 h | pendente |
+| B.3 | Boost e Off com o FG ligado: medidos sem efeito no 0.4; o texto do B.1 cobre. Opcional: On × On + Boost numa cena limitada pela CPU | — | parcial (0.4) |
 | B.4 | Fixture: troca do painel aplicada sem nova chamada; modo aplicado lido de volta | 1,5 h | pendente |
 | B.5 | **[você]** Campo: repetir o 0.4 | 1 h | pendente |
 
@@ -185,3 +186,5 @@ Cada release segue o processo de sempre: versão em todos os pontos (incluindo `
 - **2026-10-29 · decisões** Force Borderless só sai do painel (A.2 descartado); variantes sm_120 entram com testador RTX 50; flicker da UI antes de DX11/Vulkan; branch `feat/1.7` a partir da `fork/main`.
 - **2026-10-29 · Vulkan** O MFG-Unlocker do dashdogy v1.7.0 (`b97deee`, 25/10, MIT) roda a XeFG/XeLL originais no Vulkan por uma camada D3D12-sobre-Vulkan própria (`xvk`) com 83 programas SPIR-V traduzidos dos DXIL (embutidos no binário, fora do repositório). O 0.5 fecha com isso; o bloco F passa a ser portar o `xvk` (hoje F.1–F.3). A mesma versão trouxe uma flip queue nova para o pacing da XeMFG que funciona com o flip metering da NVIDIA: entra no G como G.0. Não resolve o flicker da UI: sem imagem HUD-less a HUD continua interpolada com a cena (limitação declarada deles).
 - **2026-10-29 · DX11** Retirado do plano a pedido (ponte DX11→DX12, F.1/F.2 antigos); fica para o futuro. O bloco F passa a ser só Vulkan (F.1–F.3).
+- **2026-10-29 · 0.4** Cyberpunk 2077, DLSS-G 6x, addon 1.6.0 publicado (RTX 4070 SUPER, driver 621.01), PresentMon 30 s na mesma cena, modo gravado no `ReShade.ini` antes de cada abertura (a troca pelo painel não foi testada). Latência de exibição p50/p95/p99 e FPS mostrados: jogo 35,2/46,9/49,8 ms, 222 FPS; Off 34,1/45,4/47,9 ms, 221 FPS; On 35,8/48,2/50,8 ms, 217 FPS; On + Boost 36,2/48,7/51,5 ms, 215 FPS. FPS reais 36–37, GPU ~22 ms por frame real. O log confirma "FG-safe Reflex Off active" e "Reflex mode override applied: On + Boost". Conclusão: os overrides são aplicados e não mudam nada com a GPU no limite; sem a espera do `slReflexSleep` a fila não cresce, então quem segura a fila com o DLSS-G ligado é o pacing do próprio DLSS-G. O bloco B vira explicação honesta no painel (proposta aceita); o B.2 continua para a troca pelo painel.
+- **2026-10-29 · A.1, A.3, A.4** Force Borderless fora do painel (chave do INI mantida, README). A.4, pedido no campo: com o Dynamic MFG o destaque mostrava só o multiplicador ao vivo desde o redesenho `8fe4cc9`; volta a mostrar "ao vivo / máximo" (`DynamicMultiplierText`, que estava sem uso). Gate 194/194 (3 skipped de proveniência); sem teste novo (só texto do painel).

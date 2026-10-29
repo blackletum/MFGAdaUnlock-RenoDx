@@ -1205,6 +1205,10 @@ Written to your `ReShade.ini` under `[RenoDX.MFGUnlock]`:
 | `DlssRayReconstructionPreset` | `0` | DLSS Ray Reconstruction preset applied during play: `0` keeps the game's presets; `4`-`6` select D, E or F (F is the DLSS 4.5 model). Only games that pass Ray Reconstruction presets to Streamline |
 | `DepthEdgeGuardLevel` | `0` | Optional depth-edge tuning: `0` keeps the game value; `1`-`4` select progressively lower separation thresholds |
 
+`[DLSSG] ForceBorderless=1` in `MFGAdaUnlock.ini` beside the game still serves
+the DLSS-G backend's window as borderless. Since 1.7 it is no longer in the
+panel; it is read once when the game starts.
+
 The full geometry V3 ptxas payload is larger than the provider's original Ada
 cubin slot. Builds that deliberately include this research payload never write
 past that slot: after exact provider, fatbin, cubin fingerprint, slot-size and

@@ -718,20 +718,16 @@ std::string FrameGenerationPresetText(
          " (NVIDIA override)";
 }
 
-std::string DynamicMultiplierText(
-    const mfgunlock::nvapistatus::Snapshot& status,
-    unsigned int maximum_generated_frames) {
-  if (status.sleep_status != mfgunlock::nvapistatus::kOk ||
-      status.sleep.frame_generation_multiplier < 2) {
-    return "Dynamic (waiting for live multiplier)";
-  }
-  std::string result =
-      std::to_string(status.sleep.frame_generation_multiplier) + "x live";
-  if (maximum_generated_frames != 0) {
-    result += " / " + std::to_string(maximum_generated_frames + 1) +
-              "x max";
-  }
-  return result;
+// Hero readout while Dynamic MFG is applied: the driver's live multiplier and
+// the advertised ceiling, e.g. "3x / 6x". The ceiling alone is still useful
+// before the driver reports a live value.
+std::string DynamicMultiplierText(unsigned int driver_multiplier,
+                                  unsigned int maximum_generated_frames) {
+  const std::string live =
+      driver_multiplier >= 2 ? std::to_string(driver_multiplier) + "x"
+                             : "Auto";
+  if (maximum_generated_frames == 0) return live;
+  return live + " / " + std::to_string(maximum_generated_frames + 1) + "x";
 }
 
 void DrawAdvancedQualityControls(bool adaptive_quality_managed) {
@@ -2539,7 +2535,7 @@ void OnRegisterOverlay(reshade::api::effect_runtime* runtime) {
   }
 
   const bool dynamic_applied=mfgunlock::framecount::g_dynamic_applied.load();
-  const std::string multiplier_text=dynamic_applied?(sleep_status_available && driver_multiplier>=2?std::to_string(driver_multiplier)+"x":"Auto"):
+  const std::string multiplier_text=dynamic_applied?DynamicMultiplierText(driver_multiplier,dynamic_max_generated):
       effective_seen?std::to_string(effective_multiplier)+"x":game_request_seen?std::to_string(game_multiplier)+"x":"Waiting";
   const char* player_state=runtime_error?"Compatibility issue":!enabled?"Disabled this session":mfg_confirmed?"Generating frames":
       mfg_live?"Driver reports MFG active":mfg_request_accepted?"Multiplier requested":provider_ready?"Ready - enable FG in the game":"Waiting for frame generation";
