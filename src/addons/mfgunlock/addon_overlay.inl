@@ -2427,9 +2427,16 @@ void OnRegisterOverlay(reshade::api::effect_runtime* runtime) {
   const bool ray_reconstruction_configured =
       mfgunlock::nvapistatus::NgxFeatureConfigured(
           nvapi_status.ngx.feedback_ray_reconstruction);
-  const unsigned int dynamic_max_generated =
+  // The ceiling this addon advertises when it patched the plugin; otherwise
+  // the runtime's own numFramesToGenerateMax (OTA plugins are not patched).
+  const unsigned int advertised_max_generated =
       mfgunlock::framecount::g_advertised_max_generated.load(
           std::memory_order_relaxed);
+  const unsigned int dynamic_max_generated =
+      advertised_max_generated != 0
+          ? advertised_max_generated
+          : mfgunlock::framecount::g_runtime_max_generated.load(
+                std::memory_order_relaxed);
 
   const bool restart_pending =
       configured_enabled != enabled ||
