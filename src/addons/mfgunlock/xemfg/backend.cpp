@@ -24,6 +24,7 @@
 #include <intrin.h>
 #include <map>
 #include <memory>
+#include <optional>
 #include <mutex>
 #include <set>
 #include <span>
@@ -243,6 +244,45 @@ void ConfigureFlip() noexcept {
     } catch(...) { sdk_pacing::SetFlipMetering(nullptr,false,0); }
   });
 }
+// 1.7 (plan J): dashdogy's v1.7.0 flip queue (vendor/sdk_pacing_meter.h). His
+// own standalone D3D12 host keeps it off: without OptiScaler the game's
+// hand-overs follow the queue's own releases and the clock locks below the
+// game's rate (his Subnautica 2 measurement: 100-110 fps against DLSS MFG's
+// ~180). NVIDIA's flip metering and the CPU pacer space the outputs instead,
+// as for DLSS-G; that is this host's measured default as well (plan G). The
+// pacing component itself starts with the queue on, so it is always set here.
+// [XeFG] XeFGFlipQueue=1 enables it for comparison, with XeFG's native swap
+// chain raised to XeFGNativeBuffers (default 10, at most 16) back buffers.
+struct FlipQueueChoice { bool enabled{}; uint32_t buffers{}; };
+FlipQueueChoice ConfigureFlipQueue() noexcept {
+  static std::once_flag once;
+  static FlipQueueChoice choice;
+  std::call_once(once,[] {
+    try {
+      const auto ini=ModulePath(host).parent_path()/
+#ifdef MFGUNLOCK_NATIVE_XEMFG
+          L"MFGAdaUnlock.ini";
+#else
+          L"OptiScaler.ini";
+#endif
+      choice.enabled=GetPrivateProfileIntW(L"XeFG",L"XeFGFlipQueue",0,ini.c_str())!=0;
+      auto percent=GetPrivateProfileIntW(L"XeFG",L"XeFGFlipQueueBufferPct",50,ini.c_str());
+      if(percent>100) percent=50;
+      wchar_t first[32]{};
+      GetPrivateProfileStringW(L"XeFG",L"XeFGFlipQueueFirst",L"ready",first,32,ini.c_str());
+      const bool firstReady=_wcsicmp(first,L"buffer")!=0;
+      auto buffers=GetPrivateProfileIntW(L"XeFG",L"XeFGNativeBuffers",10,ini.c_str());
+      if(buffers<2 || buffers>16) buffers=10;
+      choice.buffers=choice.enabled?buffers:0;
+      sdk_pacing::SetFlipQueueFirst(firstReady);
+      sdk_pacing::SetFlipQueue(choice.enabled,int(percent));
+      xess_mod::WriteLog("flip_queue_config","\"enabled\":"+std::string(choice.enabled?"true":"false")
+          +",\"buffer_percent\":"+std::to_string(percent)+",\"first\":\""+(firstReady?"ready":"buffer")
+          +"\",\"native_buffers\":"+std::to_string(choice.buffers));
+    } catch(...) { sdk_pacing::SetFlipQueue(false,50); choice={}; }
+  });
+  return choice;
+}
 #define API(name) decltype(&name) original_##name{}
 API(xefgSwapChainD3D12CreateContext);
 API(xefgSwapChainD3D12InitFromSwapChain);
@@ -311,6 +351,7 @@ template<class Init> Result Initialize(Handle handle, Init call) {
   c.initialized=false;
   std::string failure;
   ConfigureFlip();
+  ConfigureFlipQueue();
   if (!sdk_pacing::Install(fg,failure) || !sdk_pacing::Register(handle,c.generation,c.device.Get(),failure)) {
     Detail("XeMFG disabled: extra-output pacing unavailable: "+failure);
     original_xefgSwapChainSetEnabled(handle,0);
@@ -352,7 +393,17 @@ __declspec(noinline) Result InitDesc(Handle h,HWND w,const DXGI_SWAP_CHAIN_DESC1
   if(SdkAddress(_ReturnAddress())) return original_xefgSwapChainD3D12InitFromSwapChainDesc(h,w,d,f,q,factory,p);
   xefg_swapchain_d3d12_init_params_t raised; const auto* params=GameParams(h,p,raised);
   GameInitScope scope(GameOwned(h));
-  return Initialize(h,[&] { return original_xefgSwapChainD3D12InitFromSwapChainDesc(h,w,d,f,q,factory,params); });
+  return Initialize(h,[&] {
+    // 1.7 (plan J): with the flip queue on, XeFG's native swap chain gets the
+    // queue's back buffers (sdk_pacing.h NativeBuffersScope).
+    const auto queue=ConfigureFlipQueue();
+    std::optional<sdk_pacing::NativeBuffersScope> buffers;
+    if(queue.enabled && queue.buffers>=2 && factory) {
+      buffers.emplace(factory,fg,queue.buffers);
+      if(buffers->Reason()) xess_mod::WriteLog("native_buffers_scope","\"applied\":false,\"reason\":\""+std::string(buffers->Reason())+"\"");
+    }
+    return original_xefgSwapChainD3D12InitFromSwapChainDesc(h,w,d,f,q,factory,params);
+  });
 }
 void ApplyGameCount(Handle h);
 __declspec(noinline) Result Enable(Handle h,uint32_t enabled) {

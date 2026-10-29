@@ -16,7 +16,7 @@ configure_file(native_notices.rc.in "${CMAKE_CURRENT_BINARY_DIR}/native_notices.
 add_test(NAME xemfg_version_resource COMMAND "${CMAKE_COMMAND}" -DRC=${CMAKE_CURRENT_SOURCE_DIR}/native_notices.rc.in
   -P "${CMAKE_SOURCE_DIR}/version_resource_check.cmake")
 set(XEMFG_MODEL_SOURCES backend.cpp
-  vendor/host_unlock.cpp vendor/runtime_payload.cpp vendor/sdk_pacing.cpp vendor/cuda/cuda_route.cpp
+  vendor/host_unlock.cpp vendor/runtime_payload.cpp vendor/sdk_pacing.cpp native_xvk_stub.cpp vendor/cuda/cuda_route.cpp
   vendor/third_party/minhook/src/buffer.c vendor/third_party/minhook/src/hook.c
   vendor/third_party/minhook/src/trampoline.c vendor/third_party/minhook/src/hde/hde64.c
   "${XEMFG_GENERATED}/embedded_xess_programs.rc"
