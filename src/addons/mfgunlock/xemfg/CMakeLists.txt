@@ -54,6 +54,12 @@ add_custom_command(OUTPUT "${XEMFG_SHADER_HEADERS}/native_dejitter_cs.h"
   COMMAND "${XEMFG_FXC}" /nologo /T cs_5_0 /E main /O3 /Vn g_native_dejitter_cs
     /Fh "${XEMFG_SHADER_HEADERS}/native_dejitter_cs.h" "${CMAKE_CURRENT_SOURCE_DIR}/native_dejitter.hlsl"
   DEPENDS native_dejitter.hlsl VERBATIM)
+# 1.7 (plan E.2): the HUD stabilization mask.
+add_custom_command(OUTPUT "${XEMFG_SHADER_HEADERS}/native_ui_mask_cs.h"
+  COMMAND "${CMAKE_COMMAND}" -E make_directory "${XEMFG_SHADER_HEADERS}"
+  COMMAND "${XEMFG_FXC}" /nologo /T cs_5_0 /E main /O3 /Vn g_native_ui_mask_cs
+    /Fh "${XEMFG_SHADER_HEADERS}/native_ui_mask_cs.h" "${CMAKE_CURRENT_SOURCE_DIR}/native_ui_mask.hlsl"
+  DEPENDS native_ui_mask.hlsl VERBATIM)
 # Plan 4.4: scRGB to HDR10 encoder (fullscreen triangle).
 foreach(stage IN ITEMS vs ps)
   string(TOUPPER "${stage}" XEMFG_STAGE)
@@ -68,6 +74,7 @@ foreach(stage IN ITEMS vs ps)
     DEPENDS native_scrgb.hlsl VERBATIM)
 endforeach()
 set(XEMFG_GPU_PASS_SOURCES native_dejitter.cpp native_hud_copy.cpp "${XEMFG_SHADER_HEADERS}/native_dejitter_cs.h"
+  native_ui_mask.cpp "${XEMFG_SHADER_HEADERS}/native_ui_mask_cs.h"
   native_scrgb.cpp "${XEMFG_SHADER_HEADERS}/native_scrgb_vs.h" "${XEMFG_SHADER_HEADERS}/native_scrgb_ps.h")
 
 add_library(mfgunlock_native_xemfg SHARED ../addon.cpp ${XEMFG_MODEL_SOURCES}
@@ -185,6 +192,12 @@ target_include_directories(xemfg_dejitter_numeric PRIVATE "${XEMFG_SHADER_HEADER
 target_link_libraries(xemfg_dejitter_numeric PRIVATE d3d12 dxgi)
 add_test(NAME xemfg_dejitter_numeric COMMAND xemfg_dejitter_numeric)
 set_tests_properties(xemfg_dejitter_numeric PROPERTIES TIMEOUT 60)
+add_executable(xemfg_ui_mask_numeric "${CMAKE_SOURCE_DIR}/xemfg_ui_mask_numeric.cpp" ${XEMFG_GPU_PASS_SOURCES})
+target_include_directories(xemfg_ui_mask_numeric PRIVATE "${XEMFG_SHADER_HEADERS}")
+target_link_libraries(xemfg_ui_mask_numeric PRIVATE d3d12 dxgi)
+target_compile_definitions(xemfg_ui_mask_numeric PRIVATE NOMINMAX)
+add_test(NAME xemfg_ui_mask_numeric COMMAND xemfg_ui_mask_numeric)
+set_tests_properties(xemfg_ui_mask_numeric PROPERTIES TIMEOUT 60)
 add_executable(xemfg_scrgb_numeric "${CMAKE_SOURCE_DIR}/xemfg_scrgb_numeric.cpp" ${XEMFG_GPU_PASS_SOURCES})
 target_include_directories(xemfg_scrgb_numeric PRIVATE "${XEMFG_SHADER_HEADERS}")
 target_link_libraries(xemfg_scrgb_numeric PRIVATE d3d12 dxgi)

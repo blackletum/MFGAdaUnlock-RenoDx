@@ -506,6 +506,7 @@ users never need to edit it.
 | `[Backend] Selected` | `DLSSG` | `XeMFG` selects the XeMFG backend; restart required |
 | `[XeFG] Multiplier` | `4` | Output multiplier, `2`–`6` |
 | `[XeFG] UIComposition` | `0` | `1` composes the HUD from the game's HUD-less image, which avoids HUD interpolation artifacts (the HUD then updates at the real frame rate). Needs the game to provide a HUD-less image |
+| `[XeFG] UIStabilization` | `0` | Experimental, for games without a HUD-less image. `1` composes back-buffer pixels that stayed unchanged for a few real frames (static HUD text and icons) over every generated frame instead of interpolating them, which removes their flicker. Moving or semi-transparent HUD elements are still interpolated. Not used when the game provides a HUD-less image |
 | `[XeFG] XeFGFlipMetering` | `auto` | NVIDIA driver flip metering for generated frames; can also be toggled live in the panel |
 | `[XeFG] ForceVSyncOff` | `0` | `1` presents the game's frames with sync interval 0, as with VSync off in the game, for games that offer no VSync option (Elden Ring). Game VSync keeps flip metering and generated-frame pacing from applying; the panel warns when that happens. Also in the panel as **Force game VSync off** |
 | `[Latency] Input` / `Output` | `Auto` | Latency route. XeMFG always uses XeLL for output; Reflex input from the game is translated to XeLL |
@@ -1191,7 +1192,7 @@ Written to your `ReShade.ini` under `[RenoDX.MFGUnlock]`:
 | `DynamicMFG` | `0` | Requests native NVIDIA Dynamic MFG only on the supported 310.9.1/310.9.16 + 2.14.1/2.14.16 D3D12 runtimes after the provider reports support; takes priority over `ForceMultiplier` while active |
 | `DynamicTargetFPS` | `0` | Dynamic output target; `0` follows display refresh. With VSync active, Streamline ignores a nonzero value and follows refresh instead |
 | `ReflexSourceFpsCap` | `0` | Compatibility key for **Output FPS Cap (Reflex)**. Despite the historical key name, the number is the final/output FPS ceiling; `120` targets up to approximately 120 displayed FPS |
-| `ReflexModeOverride` | `0` | `0` preserves the game setting; `1` uses FG-safe Off by keeping Streamline at Low Latency and bypassing only `slReflexSleep`; `2` forces On; `3` forces On + Boost |
+| `ReflexModeOverride` | `0` | `0` preserves the game setting; `1` uses FG-safe Off by keeping Streamline at Low Latency and bypassing only `slReflexSleep` (the NVIDIA overlay still shows Reflex On); `2` forces On; `3` forces On + Boost. With Frame Generation on, DLSS-G paces its own queue, so these usually measure the same latency; Boost helps only when the CPU is the bottleneck. A change in the panel applies on the game's next Reflex sleep |
 | `ReflexPacingMethod` | `0` | `0` uses native `slReflexSleep`; `1` requests the experimental DXGI Waitable path after its 120-token safety probe |
 | `ReflexVrrHeadroomEnabled` | `0` | Enables the final/output Reflex cap derived from verified VRR refresh and the configured headroom |
 | `ReflexVrrHeadroomBasisPoints` | `100` | VRR headroom from `50` to `300` basis points (0.5%-3.0%); invalid values normalize to 1.0% |
@@ -1204,6 +1205,7 @@ Written to your `ReShade.ini` under `[RenoDX.MFGUnlock]`:
 | `DlssSuperResolutionPreset` | `0` | DLSS Super Resolution preset applied during play: `0` keeps the game's presets; `10`-`13` select J, K, L or M. Streamline games apply it at once; games that create DLSS through NGX use it when they recreate DLSS. An NVIDIA App preset override takes precedence |
 | `DlssRayReconstructionPreset` | `0` | DLSS Ray Reconstruction preset applied during play: `0` keeps the game's presets; `4`-`6` select D, E or F (F is the DLSS 4.5 model). Only games that pass Ray Reconstruction presets to Streamline |
 | `DepthEdgeGuardLevel` | `0` | Optional depth-edge tuning: `0` keeps the game value; `1`-`4` select progressively lower separation thresholds |
+| `Rtx50QualityFixes` | `0` | RTX 50 only, experimental: `1` applies the validated warp blend (the thin-geometry and HUD-edge quality fix) to the provider's sm_120 kernel. RTX 50 cards otherwise leave the DLSS-G provider untouched, because the other quality fixes target Ada kernels the RTX 50 does not run. Restart required |
 
 `[DLSSG] ForceBorderless=1` in `MFGAdaUnlock.ini` beside the game still serves
 the DLSS-G backend's window as borderless. Since 1.7 it is no longer in the
@@ -1440,21 +1442,30 @@ cadence.
 
 ## RTX 30-series support
 
-RTX 30-series support is now available through
+RTX 30-series (and, since its 0.4 releases, RTX 20-series) support for NVIDIA's
+own DLSS-G is available through
 [sdli1995's separate `dlssg_for_sm86` project](https://github.com/sdli1995/dlssg_for_sm86).
-It provides a dedicated SM86 backend and proxy runtime instead of relying on the
+It is a proxy DLL that keeps NVIDIA's runtime and replaces its inference
+kernels with its own CUDA kernels for SM86/SM75, instead of relying on the
 Ada/Blackwell kernels shipped in the standard DLSS-G runtime.
 
-The project's first milestone documents validation on an RTX 3080 Ti with
-Direct3D 12, including native 2x/4x operation in Black Myth: Wukong and
-Cyberpunk 2077. Follow that repository's installation, compatibility, and
-runtime-version instructions for RTX 30-series use.
+Its documentation lists Direct3D 12 only (Vulkan is not supported) and a
+recent NVIDIA driver (R580 or newer). Because it presents through NVIDIA's own
+DLSS-G path, it is not limited to borderless or windowed display modes. Follow
+that repository's installation, compatibility, and runtime-version
+instructions.
 
-`dlssg_for_sm86` is an independent implementation and is not bundled with or
-maintained by this fork. The DLSS-G backend of MFG Unlock remains targeted at
-RTX 40-series GPUs. On RTX 20 and 30-series cards, the
-[XeMFG backend](#xemfg-backend) provides multi-frame generation through Intel
-XeSS-FG instead.
+When to use which on RTX 20/30:
+
+- **`dlssg_for_sm86`** in Direct3D 12 games that ship DLSS Frame Generation,
+  for NVIDIA's frame-generation model and exclusive fullscreen.
+- **The [XeMFG backend](#xemfg-backend)** in games without DLSS Frame
+  Generation (it also reads FSR 3.1 and DLSS Super Resolution inputs), or when
+  `dlssg_for_sm86` does not support the game.
+
+`dlssg_for_sm86` is an independent implementation (GPLv3) and is not bundled
+with or maintained by this fork. The DLSS-G backend of MFG Unlock remains
+targeted at RTX 40-series GPUs.
 
 ## Building
 

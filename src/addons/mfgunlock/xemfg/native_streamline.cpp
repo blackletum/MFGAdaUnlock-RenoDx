@@ -843,7 +843,10 @@ void BeforePresent(const std::shared_ptr<Output>& o) {
   s.lastHudFiltered=frame?frame->hudFiltered:0; s.lastHudCopied=frame?frame->hudCopied:0;
   const bool hudless=frame && !frame->failed
       && (frame->resources&(1u<<XEFG_SWAPCHAIN_RES_HUDLESS_COLOR));
-  const bool compositionReady=ApplyUiComposition(*o,hudless);
+  // 1.7 (plan E.2): the game's own HUD-less color always takes precedence.
+  const bool stabilized=!hudless && frame && !frame->failed && ControlsSettings().uiStabilization
+      && StabilizeHud(*o,id);
+  const bool compositionReady=ApplyUiComposition(*o,hudless || stabilized,stabilized);
   constexpr uint32_t required=(1u<<XEFG_SWAPCHAIN_RES_DEPTH)|(1u<<XEFG_SWAPCHAIN_RES_MOTION_VECTOR);
   const bool nativeReflex=s.latencyOutput.load()==LatencyOutput::Reflex;
   const bool latencyReady=s.reflexOptionsReady && (nativeReflex?s.gameReflexMode!=0:s.reflexOff.load());

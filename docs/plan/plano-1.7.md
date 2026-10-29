@@ -68,11 +68,11 @@ Já estava previsto no fechamento da 1.6 ("plano próprio"). O XeMFG já tem um 
 | # | Tarefa | Resultado esperado | Est. | Status |
 |---|---|---|---|---|
 | 0.1 | Partir do log 1.4.4 da 5070 Ti: o código de arch gate e dos slots das correções não mudou até a 1.6.0 (não há checagem de arquitetura da GPU), então as conclusões valem. O log com a 1.6 vem com o tester do C.5, sem bloquear | conclusões do log válidas para a 1.6 | — | feito |
-| 0.2 | Ler um provedor 310.9.16: existem slots sm_120 para os três kernels das correções? Com que tamanho? | viabilidade do bloco C | 2 h | pendente |
-| 0.3 | Reflex: logar o modo **aplicado** (`slReflexGetState` / `NvAPI_D3D_GetSleepStatus`) depois de cada troca, e se a troca do painel ficou pendente | separa as hipóteses 1, 2 e 3 | 2 h | pendente |
+| 0.2 | Ler um provedor 310.9.16: existem slots sm_120 para os três kernels das correções? Com que tamanho? | viabilidade do bloco C | 2 h | feito (só PTX sm_120, sem cubin) |
+| 0.3 | Reflex: logar o modo **aplicado** (`slReflexGetState` / `NvAPI_D3D_GetSleepStatus`) depois de cada troca, e se a troca do painel ficou pendente | separa as hipóteses 1, 2 e 3 | 2 h | feito (driver: low latency e sleep do jogo; sem campo de Boost) |
 | 0.4 | **[você]** Reflex: PresentMon 30 s em 1 jogo (Witcher 3 ou Cyberpunk) com Jogo / Off / On / On + Boost | diferença real de latência entre os modos | 1 h | feito (Cyberpunk: os quatro empatam) |
 | 0.5 | XeFG no Vulkan: o SDK da Intel continua só D3D12; o dashdogy resolveu com uma camada D3D12-sobre-Vulkan (`xvk`, v1.7.0, MIT) | decide o bloco F (portar o `xvk`) | 30 min | feito |
-| 0.6 | Medir o flicker atual (captura com UI Composition desligada, 2 jogos) e o que o `native_hud_copy` cobre | base do bloco E | 1,5 h | pendente |
+| 0.6 | Medir o flicker atual (captura com UI Composition desligada, 2 jogos) e o que o `native_hud_copy` cobre | base do bloco E | 1,5 h | parcial (análise feita; captura vai com o E.4) |
 
 ---
 
@@ -91,10 +91,10 @@ Depende do 0.3 e do 0.4.
 
 | # | Tarefa | Est. | Status |
 |---|---|---|---|
-| B.1 | Painel: explicar que o "Off" mantém o Reflex do Streamline ligado e só tira a espera, e que com o Frame Generation ligado Off e Boost geralmente não mudam a latência (o Boost só ajuda com a CPU como gargalo); mostrar o modo aplicado quando houver leitura | 1,5 h | pendente |
-| B.2 | Troca no painel sem nova chamada do jogo: reenviar as opções no próximo `slReflexSleep`/Present da thread dona (o mesmo ponto seguro que já existe para o limite de FPS) | 2 h | pendente |
+| B.1 | Painel: explicar que o "Off" mantém o Reflex do Streamline ligado e só tira a espera, e que com o Frame Generation ligado Off e Boost geralmente não mudam a latência (o Boost só ajuda com a CPU como gargalo); mostrar o modo aplicado quando houver leitura | 1,5 h | feito |
+| B.2 | Troca no painel sem nova chamada do jogo: reenviar as opções no próximo `slReflexSleep`/Present da thread dona (o mesmo ponto seguro que já existe para o limite de FPS) | 2 h | feito |
 | B.3 | Boost e Off com o FG ligado: medidos sem efeito no 0.4; o texto do B.1 cobre. Opcional: On × On + Boost numa cena limitada pela CPU | — | parcial (0.4) |
-| B.4 | Fixture: troca do painel aplicada sem nova chamada; modo aplicado lido de volta | 1,5 h | pendente |
+| B.4 | Fixture: troca do painel aplicada sem nova chamada; modo aplicado lido de volta | 1,5 h | feito |
 | B.5 | **[você]** Campo: repetir o 0.4 | 1 h | pendente |
 
 ## Bloco C — Correções de qualidade na série RTX 50 (DLSS-G)
@@ -103,10 +103,10 @@ Depende do 0.2. Sem uma RTX 50 aqui, cada item precisa de um testador.
 
 | # | Tarefa | Est. | Status |
 |---|---|---|---|
-| C.1 | Não reescrever arch gates quando a GPU já é Blackwell (NVAPI arch 0x1b0); o log diz que não precisa | 1 h | pendente |
-| C.2 | Log honesto: "applied" só quando o slot trocado é o da arquitetura da GPU; na RTX 50, até o C.3 sair, dizer "correções de qualidade só para Ada" | 1 h | pendente |
-| C.3 | Tabela de slots **sm_120** e montagem das variantes sm_120 (sem o rebaixamento para sm_89) do `BlendCandidatesFused` e do `EstimateIntermMvecsScatter`, com a mesma validação exata de tamanho e de fatbin | 6 h | pendente |
-| C.4 | Opção no INI (desligada por padrão) para aplicar as correções na RTX 50, enquanto o campo não confirmar | 1 h | pendente |
+| C.1 | Não reescrever arch gates quando a GPU já é Blackwell (NVAPI arch 0x1b0); o log diz que não precisa | 1 h | feito (IDs PCI pelo registro) |
+| C.2 | Log honesto: "applied" só quando o slot trocado é o da arquitetura da GPU; na RTX 50, até o C.3 sair, dizer "correções de qualidade só para Ada" | 1 h | feito |
+| C.3 | Tabela de slots **sm_120** e montagem das variantes sm_120 (sem o rebaixamento para sm_89) do `BlendCandidatesFused` e do `EstimateIntermMvecsScatter`, com a mesma validação exata de tamanho e de fatbin | 6 h | feito (warp blend; scatter fica Ada) |
+| C.4 | Opção no INI (desligada por padrão) para aplicar as correções na RTX 50, enquanto o campo não confirmar | 1 h | feito (`Rtx50QualityFixes`) |
 | C.5 | **[você/usuário RTX 50]** Campo: mesma cena com as correções ligadas e desligadas, capturas e PresentMon | — | pendente |
 
 ## Bloco D — Adaptador DLSS-SR → DLSS-G (protótipo)
@@ -122,9 +122,9 @@ Depende do 0.6.
 
 | # | Tarefa | Est. | Status |
 |---|---|---|---|
-| E.1 | Máscara de HUD quando o jogo entrega a HUD-less: copiar os pixels da HUD do frame real sobre os gerados | 4 h | pendente |
-| E.2 | Sem HUD-less: máscara de pixels estáticos (iguais nos dois frames reais, com MV zero ou desconhecido), opcional | 4 h | pendente |
-| E.3 | Opção no painel (Desligada / Máscara pela HUD-less / Heurística), com a padrão decidida pela medição | 1 h | pendente |
+| E.1 | Máscara de HUD quando o jogo entrega a HUD-less: copiar os pixels da HUD do frame real sobre os gerados | 4 h | não se aplica (a XeFG já faz com o UI Composition) |
+| E.2 | Sem HUD-less: máscara de pixels estáticos (iguais nos dois frames reais, com MV zero ou desconhecido), opcional | 4 h | feito (`UIStabilization`) |
+| E.3 | Opção no painel (Desligada / Máscara pela HUD-less / Heurística), com a padrão decidida pela medição | 1 h | feito (caixa separada) |
 | E.4 | **[você]** Campo: mesmos jogos do 0.6 | 1 h | pendente |
 
 ## Bloco F — XeMFG em Vulkan
@@ -149,7 +149,7 @@ Só depois do A–E. O suporte a DX11 (ponte DX11→DX12) saiu deste plano e fic
 
 | # | Tarefa | Est. | Status |
 |---|---|---|---|
-| H.1 | README: atualizar a seção das RTX 30 (versão 0.4.1, RTX 20 incluída, só D3D12, sem limite de borderless, motor XeSS-FG próprio) e quando usar o XeMFG ou o `dlssg_for_sm86` | 1 h | pendente |
+| H.1 | README: atualizar a seção das RTX 30 (versão 0.4.1, RTX 20 incluída, só D3D12, sem limite de borderless, motor XeSS-FG próprio) e quando usar o XeMFG ou o `dlssg_for_sm86` | 1 h | feito |
 | H.2 | *(Opcional)* **[comunidade]** Comparação A/B numa RTX 30 | — | pendente |
 
 ---
@@ -158,8 +158,7 @@ Só depois do A–E. O suporte a DX11 (ponte DX11→DX12) saiu deste plano e fic
 
 | Versão | Conteúdo | Condição |
 |---|---|---|
-| 1.7.0 | A, B, C.1/C.2, E (o que estiver medido), H.1 | gate completo, campo do B e do E |
-| 1.7.x | C.3/C.4 (RTX 50) | campo com uma RTX 50 |
+| 1.7.0 | A, B, C (C.3/C.4 como opção experimental desligada), E.2 (opção experimental desligada), H.1 | gate completo, campo do B e do E, e o C.5 com o tester RTX 50 |
 | Plano próprio | D (SR→G), F (Vulkan), G se der caminho | resultado do protótipo |
 
 Cada release segue o processo de sempre: versão em todos os pontos (incluindo `addon_overlay.inl` e a versão numérica do recurso), notas, `fork/main` e `develop` adiantados, tag e release com o addon.
@@ -188,3 +187,10 @@ Cada release segue o processo de sempre: versão em todos os pontos (incluindo `
 - **2026-10-29 · DX11** Retirado do plano a pedido (ponte DX11→DX12, F.1/F.2 antigos); fica para o futuro. O bloco F passa a ser só Vulkan (F.1–F.3).
 - **2026-10-29 · 0.4** Cyberpunk 2077, DLSS-G 6x, addon 1.6.0 publicado (RTX 4070 SUPER, driver 621.01), PresentMon 30 s na mesma cena, modo gravado no `ReShade.ini` antes de cada abertura (a troca pelo painel não foi testada). Latência de exibição p50/p95/p99 e FPS mostrados: jogo 35,2/46,9/49,8 ms, 222 FPS; Off 34,1/45,4/47,9 ms, 221 FPS; On 35,8/48,2/50,8 ms, 217 FPS; On + Boost 36,2/48,7/51,5 ms, 215 FPS. FPS reais 36–37, GPU ~22 ms por frame real. O log confirma "FG-safe Reflex Off active" e "Reflex mode override applied: On + Boost". Conclusão: os overrides são aplicados e não mudam nada com a GPU no limite; sem a espera do `slReflexSleep` a fila não cresce, então quem segura a fila com o DLSS-G ligado é o pacing do próprio DLSS-G. O bloco B vira explicação honesta no painel (proposta aceita); o B.2 continua para a troca pelo painel.
 - **2026-10-29 · A.1, A.3, A.4** Force Borderless fora do painel (chave do INI mantida, README). A.4, pedido no campo: com o Dynamic MFG o destaque mostrava só o multiplicador ao vivo desde o redesenho `8fe4cc9`; volta a mostrar "ao vivo / máximo" (`DynamicMultiplierText`, que estava sem uso). Gate 194/194 (3 skipped de proveniência); sem teste novo (só texto do painel).
+- **2026-10-29 · B.1, B.2, B.4, 0.3** Painel do Reflex: o Off explica que o Reflex continua ligado no Streamline e só a espera sai, e que com o FG ligado Off e Boost costumam medir igual (dados do 0.4); nova linha "Driver Reflex" com o que o `NvAPI_D3D_GetSleepStatus` informa (low latency e se o jogo chama o sleep; o driver não expõe o Boost). B.2: uma troca no painel que ficou pendente é reenviada pelo próximo `slReflexSleep` da thread dona das opções do jogo (antes só o Present tentava, e ele roda em outra thread em muitos jogos). Teste em `latency_reflex_tests`: falha sem a mudança (linha 224), passa com ela; o sleep segue em ~2,5 ns.
+- **2026-10-29 · 0.2** Provedor 310.9.16: os fatbins do `BlendCandidatesFused` e do `EstimateIntermMvecsScatter` têm PTX sm_120 (comprimido), PTX sm_89 e cubin sm_89, e **nenhum cubin sm_120**. Uma RTX 50 compila o PTX sm_120 na hora (JIT); as correções da Ada trocam cubins/PTX sm_89 que ela nunca usa. Os "Blackwell framework kernels" são o PTX da Blackwell montado para a Ada: na RTX 50 eles já são o caminho nativo.
+- **2026-10-29 · C.1, C.2** `gpu_arch.hpp`: a família da GPU vem dos IDs PCI das placas NVIDIA no registro (AD10x 0x2680–0x28FF, GB20x 0x2B80–0x2FFF), lidos pelo `kernelbase.dll` (o patch do provedor roda dentro do loader do Windows, onde inicializar o NVAPI pode travar; sem import estático de `advapi32`, que o `xemfg_addon_imports` barra). Só quando todas as placas NVIDIA são RTX 50 o addon deixa o provedor intacto (sem arch gates, sem kernels Ada) e diz isso no log. ID desconhecido mantém o comportamento anterior.
+- **2026-10-29 · C.3, C.4** `Rtx50QualityFixes=1` (desligado por padrão): numa RTX 50, o warp blend validado (V3) é aplicado reescrevendo o PTX sm_120 do próprio provedor, sem rebaixar para sm_89; o driver compila esse PTX. O previous scatter, o intermediate scatter e o silhouette guard continuam só na Ada (dependem dos cubins sm_89) e o log diz que não foram aplicados. `thin_geometry_provider_tests` reconstrói o fatbin real para sm_89 e sm_120; o PTX sm_120 resultante passa no `ptxas` 13.0 (47 registradores, sem spill, mesmo perfil do sm_89). Falta o campo com o tester (C.5).
+- **2026-10-29 · E** A API da XeFG já tem o modo que o E.1 previa (interpolar a HUD-less e extrair a UI do back buffer): é o UI Composition existente, para jogos que entregam HUD-less. O flicker que sobra é o de jogos sem HUD-less. E.2: `[XeFG] UIStabilization` (experimental, desligado): a cada frame real, um passe próprio na fila de apresentação copia o back buffer como HUD-less e gera uma textura de UI com os pixels que ficaram iguais por 4 frames reais (tolerância 2/255, 1 pixel de dilatação para as bordas dos textos); a XeFG compõe essa HUD do frame real sobre os gerados. A HUD-less do jogo sempre tem prioridade. Painel: caixa "HUD stabilization (experimental)" e o estado em "HUD handling". Testes: `xemfg_ui_mask_numeric` (WARP: HUD composta depois de 4 frames, cena transparente, HUD-less exata, histórico reinicia ao mudar o tamanho) e `xemfg_ui_composition` (composição sem a preferência do UI Composition, e desliga quando as entradas somem).
+- **2026-10-29 · gate** B, C, E e H.1 juntos: 197/197 (3 skipped de proveniência).
+- **2026-10-29 · G.0, leitura** A flip queue do dashdogy (`sdk_pacing_meter.h`, v1.6.1–1.7.0) é um "jitter buffer": cada lote é entregue cedo numa fila de cerca de um lote e um relógio próprio libera cada flip, com várias correções de campo (hitch, lock-in, coupled decay). É um sistema grande (o `sdk_pacing.cpp` deles tem 134 KB, o nosso 54 KB); portar fica para o plano próprio do G, com PresentMon antes e depois.

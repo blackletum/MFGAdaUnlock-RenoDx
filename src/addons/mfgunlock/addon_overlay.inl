@@ -1063,12 +1063,12 @@ void NotifyReflexPacingSettingChanged() {
       true, std::memory_order_release);
 }
 
-void DrawReflexPacingLabControl() {
+void DrawReflexPacingLabControl(reshade::api::effect_runtime* runtime) {
   using namespace mfgunlock;
   reflexpacing::g_ui_heartbeat_ms.store(GetTickCount64(),
                                         std::memory_order_release);
   constexpr const char* kModeOverrides[] = {
-      "Game controlled", "Off (FG-safe sleep bypass)", "Force On",
+      "Game controlled", "Off (skip Reflex sleep; FG stays on)", "Force On",
       "Force On + Boost"};
   int mode_override = static_cast<int>(pacing::NormalizeReflexModeOverride(
       reflexpacing::g_mode_override.load(std::memory_order_relaxed)));
@@ -1083,7 +1083,12 @@ void DrawReflexPacingLabControl() {
                               mode_override);
   }
   HelpMarker(
-      "FG-safe Off keeps Streamline's internal Reflex mode On because several DLSS-G integrations disable Frame Generation when mode Off is submitted. It bypasses slReflexSleep instead, while preserving frame tokens and markers. With DXGI Waitable selected, the waitable pacer replaces that sleep after its safety probe. On + Boost may improve clock stability at the cost of power and temperature.");
+      "Off does not turn Reflex off: DLSS-G needs it, and several games disable Frame Generation when Reflex is off. Streamline and the NVIDIA overlay keep reporting Reflex On; only the Reflex sleep is skipped, while frame tokens and markers are preserved. With DXGI Waitable selected, the waitable pacer replaces that sleep after its safety probe.\n\nWith Frame Generation on, DLSS-G paces its own queue, so Off, On and On + Boost usually measure the same latency (Cyberpunk 2077 at 6x: within 2 ms of each other). Boost only helps when the CPU is the bottleneck and the GPU would otherwise lower its clocks; it costs power and temperature.");
+  if (mode_override == static_cast<int>(pacing::ReflexModeOverride::kOff) ||
+      mode_override == static_cast<int>(pacing::ReflexModeOverride::kOnBoost)) {
+    ImGui::TextDisabled(
+        "With Frame Generation on, expect little or no latency change.");
+  }
 
   constexpr const char* kPacingMethods[] = {
       "Native Reflex Sleep", "DXGI Waitable (Experimental)"};
@@ -1190,6 +1195,20 @@ void DrawReflexPacingLabControl() {
                          std::memory_order_relaxed)
                          ? kUiPositive
                          : kUiMuted));
+    // The driver's own view (NvAPI_D3D_GetSleepStatus). It reports low
+    // latency mode and whether the game sleeps; it has no Boost field.
+    const auto& nvapi_status = ObserveNvapiUiStatus(runtime);
+    if (nvapi_status.sleep_status == mfgunlock::nvapistatus::kOk) {
+      const std::string driver_reflex =
+          std::string(nvapi_status.sleep.low_latency_mode != 0
+                          ? "Low latency On"
+                          : "Low latency Off") +
+          (nvapi_status.sleep.game_sleep != 0 ? "; game sleeps"
+                                              : "; no game sleep");
+      StatusRow("Driver Reflex", driver_reflex.c_str(), kUiMuted);
+    } else {
+      StatusRow("Driver Reflex", "Not reported", kUiMuted);
+    }
     if (state == reflexpacing::WaitableState::kFallback)
       StatusRow("Fallback reason", ReflexWaitableFallbackText(reason),
                 kUiWarning);
@@ -2933,7 +2952,7 @@ void OnRegisterOverlay(reshade::api::effect_runtime* runtime) {
 #if defined(MFGUNLOCK_NATIVE_XEMFG)
     mfgunlock::dlssglatency::Draw();
 #endif
-    if(ImGui::CollapsingHeader("Advanced pacing (testing)")) DrawReflexPacingLabControl();
+    if(ImGui::CollapsingHeader("Advanced pacing (testing)")) DrawReflexPacingLabControl(runtime);
     ImGui::Spacing();
     ImGui::TextDisabled("LATENCY GUARD");
     ImGui::Separator();
