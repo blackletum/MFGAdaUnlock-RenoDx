@@ -338,7 +338,21 @@ static HRESULT STDMETHODCALLTYPE FactoryHook(IDXGIFactory2* f,IUnknown* d,HWND w
   if(GameOwnsFrameGeneration()) return originalFactory(f,d,w,desc,full,restrictOutput,out);
 #ifdef MFGUNLOCK_XEMFG_VULKAN
   // 1.7 (plan F): a Vulkan game's DXGI chains are the driver's presentation.
-  if(vulkan::GameUsesVulkan()) return originalFactory(f,d,w,desc,full,restrictOutput,out);
+  if(vulkan::GameUsesVulkan() || vulkan::InstanceSeen()) {
+    const auto hr=originalFactory(f,d,w,desc,full,restrictOutput,out);
+    HMODULE caller{}; wchar_t name[MAX_PATH]{};
+    if(GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+        reinterpret_cast<LPCWSTR>(_ReturnAddress()),&caller)) GetModuleFileNameW(caller,name,MAX_PATH);
+    const wchar_t* leaf=wcsrchr(name,L'\\'); leaf=leaf?leaf+1:name;
+    std::string module; for(const wchar_t* c=leaf;*c;++c) module+=*c<0x80?char(*c):'?';
+    static std::atomic<int> budget{};
+    if(budget.fetch_add(1)<16)
+      xess_mod::WriteLog("vk_game_dxgi_swapchain","\"result\":"+std::to_string(uint32_t(hr))+",\"window\":"+std::to_string(uintptr_t(w))
+          +",\"width\":"+std::to_string(desc?desc->Width:0)+",\"height\":"+std::to_string(desc?desc->Height:0)
+          +",\"buffers\":"+std::to_string(desc?desc->BufferCount:0)+",\"format\":"+std::to_string(desc?int(desc->Format):0)
+          +",\"caller\":\""+module+"\",\"internal\":"+(internalCreate?"true":"false"));
+    return hr;
+  }
 #endif
   if(internalCreate) {
     const auto hr=originalFactory(f,d,w,desc,full,restrictOutput,out);

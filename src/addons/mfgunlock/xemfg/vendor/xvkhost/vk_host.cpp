@@ -535,7 +535,9 @@ bool Eligible(HostDevice& host, const VkSwapchainCreateInfoKHR& info, HWND windo
     else if (!ChooseFormat(info.imageFormat, info.imageColorSpace, format)) reason = "swapchain_format";
     else if (info.imageSharingMode == VK_SHARING_MODE_CONCURRENT) reason = "swapchain_concurrent";
     else if (!info.imageExtent.width || !info.imageExtent.height) reason = "swapchain_extent";
-    else if (PNextHas(info.pNext, VK_STRUCTURE_TYPE_SURFACE_FULL_SCREEN_EXCLUSIVE_INFO_EXT)) reason = "fullscreen_exclusive";
+    // MFGAdaUnlock 1.7: the addon answers the mode commands on the host's chain (native_vulkan.cpp) and CreateFake gives
+    // the layer's chain the game's own mode; removing it instead let the driver pick (RDR2: a frozen picture in focus).
+    else if (!gStandalone.load() && PNextHas(info.pNext, VK_STRUCTURE_TYPE_SURFACE_FULL_SCREEN_EXCLUSIVE_INFO_EXT)) reason = "fullscreen_exclusive";
     else return true;
     return false;
 }
@@ -2398,7 +2400,9 @@ bool CaptureDlssEvaluate(void* command, const NVSDK_NGX_Parameter* parameters) n
         in.motion = motion->Resource.ImageViewInfo.Image;
         in.motionView = motion->Resource.ImageViewInfo.ImageView;
         in.motionFormat = motion->Resource.ImageViewInfo.Format;
-        if (depth->Resource.ImageViewInfo.SubresourceRange.aspectMask != VK_IMAGE_ASPECT_DEPTH_BIT &&
+        // MFGAdaUnlock 1.7: with the addon's own single-aspect views (below) a depth+stencil view is fine (Red Dead
+        // Redemption 2 passes its D32S8 depth that way); the game's own view is sampled only with one aspect.
+        if (!gAddonInputView.load() && depth->Resource.ImageViewInfo.SubresourceRange.aspectMask != VK_IMAGE_ASPECT_DEPTH_BIT &&
             depth->Resource.ImageViewInfo.SubresourceRange.aspectMask != VK_IMAGE_ASPECT_COLOR_BIT)
             return false;
         // MFGAdaUnlock 1.7: the game's views may span depth and stencil (a D24S8 view declared COLOR to NGX); the copy

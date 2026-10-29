@@ -8,6 +8,7 @@
 #include <nvsdk_ngx_vk.h>
 #include <nvsdk_ngx_params.h>
 #include <intrin.h>
+#include <tlhelp32.h>
 #include <atomic>
 #include <map>
 #include <mutex>
@@ -53,7 +54,9 @@ bool FromSelf(const void* caller) noexcept {
 }
 bool Passed(const void* caller) noexcept { return internalDepth>0 || FromSelf(caller); }
 std::atomic<bool> takeoverSeen{};
+std::atomic<uint64_t> presentsDone{}; // the game's presents through this hook (hang watch)
 std::atomic<VkDevice> inputDevice{}; // the host's device, for the input copy's own views
+std::atomic<bool> exclusiveExtension{}; // the game's device enabled VK_EXT_full_screen_exclusive
 void FlushLog();
 
 #define MFG_VK_EXPORTS(X) \
@@ -150,6 +153,9 @@ __declspec(noinline) VkResult VKAPI_CALL Hook_vkCreateDevice(VkPhysicalDevice ph
   }
   if(result==VK_SUCCESS && output && *output && edit) {
     gameVulkan=true;
+    for(uint32_t i=0;info && i<info->enabledExtensionCount;++i)
+      if(info->ppEnabledExtensionNames[i] && !strcmp(info->ppEnabledExtensionNames[i],VK_EXT_FULL_SCREEN_EXCLUSIVE_EXTENSION_NAME))
+        exclusiveExtension=true;
     {
       std::lock_guard guard(extensionLock);
       auto& e=deviceExtensions[*output];
@@ -199,37 +205,46 @@ __declspec(noinline) VkResult VKAPI_CALL Hook_vkCreateSwapchainKHR(VkDevice devi
     const VkAllocationCallbacks* allocator,VkSwapchainKHR* output) {
   if(Passed(_ReturnAddress())) return original_vkCreateSwapchainKHR(device,info,allocator,output);
   Internal internal;
-  // The host refuses a chain that asks for full-screen exclusive: the chain
-  // is created without it (borderless) and the mode calls succeed above. The
-  // structures are unlinked for this call only and relinked before return.
-  struct Unlinked { VkBaseOutStructure* owner; VkBaseOutStructure* removed; };
-  std::vector<Unlinked> unlinked;
-  VkSwapchainCreateInfoKHR adjusted{};
+  // Full-screen exclusive is disallowed on every chain of the game while the
+  // host is on: an exclusive native chain kept the display after the takeover
+  // (RDR2 in focus showed its last picture). The mode commands are answered
+  // by the hooks below. The game's structure is restored before returning.
   const VkSwapchainCreateInfoKHR* used=info;
-  if(info) {
-    const auto exclusive=[](const VkBaseOutStructure* s) {
-      return s && (s->sType==VK_STRUCTURE_TYPE_SURFACE_FULL_SCREEN_EXCLUSIVE_INFO_EXT
-          || s->sType==VK_STRUCTURE_TYPE_SURFACE_FULL_SCREEN_EXCLUSIVE_WIN32_INFO_EXT);
-    };
-    adjusted=*info;
-    auto* head=reinterpret_cast<VkBaseOutStructure*>(const_cast<void*>(info->pNext));
-    while(exclusive(head)) { unlinked.push_back({nullptr,head}); head=head->pNext; }
-    adjusted.pNext=head;
-    unsigned links=0;
-    for(auto* s=head;s && s->pNext && links<64;++links) {
-      if(exclusive(s->pNext)) { unlinked.push_back({s,s->pNext}); s->pNext=s->pNext->pNext; }
-      else s=s->pNext;
-    }
-    if(!unlinked.empty()) {
-      used=&adjusted;
-      static std::atomic<bool> logged{};
-      if(!logged.exchange(true)) xess_mod::WriteLog("vk_swapchain_fullscreen_exclusive","\"removed\":"+std::to_string(unlinked.size()));
-    }
+  VkSurfaceFullScreenExclusiveInfoEXT* exclusive{};
+  VkFullScreenExclusiveEXT requested{};
+  for(auto* next=info?static_cast<const VkBaseInStructure*>(info->pNext):nullptr;next;next=next->pNext)
+    if(next->sType==VK_STRUCTURE_TYPE_SURFACE_FULL_SCREEN_EXCLUSIVE_INFO_EXT)
+      exclusive=reinterpret_cast<VkSurfaceFullScreenExclusiveInfoEXT*>(const_cast<VkBaseInStructure*>(next));
+  if(exclusive) {
+    requested=exclusive->fullScreenExclusive;
+    exclusive->fullScreenExclusive=VK_FULL_SCREEN_EXCLUSIVE_DISALLOWED_EXT;
+    static std::atomic<int> logged{-1};
+    if(logged.exchange(int(requested))!=int(requested))
+      xess_mod::WriteLog("vk_swapchain_fullscreen_exclusive","\"requested\":"+std::to_string(int(requested))+",\"used\":\"disallowed\"");
   }
-  struct Relink {
-    std::vector<Unlinked>& list;
-    ~Relink() { for(auto it=list.rbegin();it!=list.rend();++it) if(it->owner) it->owner->pNext=it->removed; }
-  } relink{unlinked};
+  struct Restore {
+    VkSurfaceFullScreenExclusiveInfoEXT* exclusive; VkFullScreenExclusiveEXT mode;
+    ~Restore() { if(exclusive) exclusive->fullScreenExclusive=mode; }
+  } restore{exclusive,requested};
+  // A game that enables the extension but names no mode (RDR2 in its fullscreen
+  // mode) leaves the choice to the driver, which gave its own chain the display
+  // for good: the chain is created disallowed explicitly.
+  VkSwapchainCreateInfoKHR named{};
+  VkSurfaceFullScreenExclusiveInfoEXT disallowed{VK_STRUCTURE_TYPE_SURFACE_FULL_SCREEN_EXCLUSIVE_INFO_EXT,nullptr,
+      VK_FULL_SCREEN_EXCLUSIVE_DISALLOWED_EXT};
+  if(info && !exclusive && exclusiveExtension.load()) {
+    named=*info; disallowed.pNext=const_cast<void*>(info->pNext); named.pNext=&disallowed; used=&named;
+    static std::atomic<bool> logged{};
+    if(!logged.exchange(true)) xess_mod::WriteLog("vk_swapchain_fullscreen_exclusive","\"requested\":\"none\",\"used\":\"disallowed\"");
+  }
+  // MAILBOX becomes IMMEDIATE (VSync stays off): the layer's chain in mailbox
+  // mode kept an old picture on screen while the game had the focus (RDR2).
+  VkSwapchainCreateInfoKHR immediate{};
+  if(info && info->presentMode==VK_PRESENT_MODE_MAILBOX_KHR) {
+    immediate=*used; immediate.presentMode=VK_PRESENT_MODE_IMMEDIATE_KHR; used=&immediate;
+    static std::atomic<bool> logged{};
+    if(!logged.exchange(true)) xess_mod::WriteLog("vk_swapchain_present_mode","\"requested\":\"mailbox\",\"used\":\"immediate\"");
+  }
   VkResult result=VK_SUCCESS;
   if(xess_vulkan::CreateSwapchain(device,used,allocator,output,original_vkCreateSwapchainKHR,result)) {
     if(result==VK_SUCCESS && output && xess_vulkan::OwnsSwapchain(*output)) takeoverSeen=true;
@@ -269,6 +284,7 @@ __declspec(noinline) VkResult VKAPI_CALL Hook_vkAcquireNextImage2KHR(VkDevice de
 __declspec(noinline) VkResult VKAPI_CALL Hook_vkQueuePresentKHR(VkQueue queue,const VkPresentInfoKHR* info) {
   if(Passed(_ReturnAddress())) return original_vkQueuePresentKHR(queue,info);
   Internal internal;
+  struct Count { ~Count() { presentsDone.fetch_add(1,std::memory_order_relaxed); } } count;
   VkResult result=VK_SUCCESS;
   if(xess_vulkan::QueuePresent(queue,info,result)) return result;
   result=original_vkQueuePresentKHR(queue,info);
@@ -393,12 +409,12 @@ VkResult VKAPI_CALL Hook_vkWaitForPresentKHR(VkDevice device,VkSwapchainKHR swap
 // Full-screen exclusive: XeFG presents its own chain borderless, so the
 // game's requests on the host's chain succeed without a mode change.
 VkResult VKAPI_CALL Hook_vkAcquireFullScreenExclusiveModeEXT(VkDevice device,VkSwapchainKHR swapchain) {
-  if(xess_vulkan::OwnsSwapchain(swapchain)) return VK_SUCCESS;
+  if(xess_vulkan::OwnsSwapchain(swapchain) || Enabled()) return VK_SUCCESS;   // chains are created disallowed (above)
   const auto original=Extension(device,&Extensions::vkAcquireFullScreenExclusiveModeEXT);
   return original?original(device,swapchain):VK_ERROR_INITIALIZATION_FAILED;
 }
 VkResult VKAPI_CALL Hook_vkReleaseFullScreenExclusiveModeEXT(VkDevice device,VkSwapchainKHR swapchain) {
-  if(xess_vulkan::OwnsSwapchain(swapchain)) return VK_SUCCESS;
+  if(xess_vulkan::OwnsSwapchain(swapchain) || Enabled()) return VK_SUCCESS;
   const auto original=Extension(device,&Extensions::vkReleaseFullScreenExclusiveModeEXT);
   return original?original(device,swapchain):VK_ERROR_INITIALIZATION_FAILED;
 }
@@ -629,11 +645,63 @@ NVSDK_NGX_Result NVSDK_CONV NgxRelease(NVSDK_NGX_Handle* handle) {
 }
 } // namespace
 
+// [Diagnostics] VulkanFaults=1, hang watch: when a taken-over chain stops
+// presenting for 3 s, every thread's instruction pointer and the image
+// addresses on its stack go to the log once (module+offset).
+std::string ThreadStack(HANDLE thread) {
+  CONTEXT context{}; context.ContextFlags=CONTEXT_CONTROL|CONTEXT_INTEGER;
+  if(!GetThreadContext(thread,&context)) return {};
+  std::string frames="\"rip:"+ModuleOffset(context.Rip)+"\"";
+  const auto* stack=reinterpret_cast<const uint64_t*>(context.Rsp);
+  for(unsigned i=0,found=0;i<512 && found<16;++i) {
+    uint64_t value{};
+    if(!ReadProcessMemory(GetCurrentProcess(),stack+i,&value,sizeof(value),nullptr)) break;
+    const auto name=ModuleOffset(value);
+    if(name.empty()) continue;
+    frames+=",\""+std::to_string(i)+":"+name+"\"";
+    ++found;
+  }
+  return frames;
+}
+DWORD WINAPI HangWatch(void*) {
+  uint64_t last=0; unsigned still=0; bool reported=false;
+  for(;;) {
+    Sleep(1000);
+    if(!takeoverSeen.load()) continue;
+    const uint64_t done=presentsDone.load(std::memory_order_relaxed);
+    if(done!=last) { last=done; still=0; reported=false; continue; }
+    if(++still<3 || reported) continue;
+    reported=true;
+    const DWORD self=GetCurrentThreadId();
+    const HANDLE threads=CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD,0);
+    if(threads==INVALID_HANDLE_VALUE) continue;
+    THREADENTRY32 entry{sizeof(entry)};
+    unsigned logged=0;
+    for(BOOL ok=Thread32First(threads,&entry);ok && logged<64;ok=Thread32Next(threads,&entry)) {
+      if(entry.th32OwnerProcessID!=GetCurrentProcessId() || entry.th32ThreadID==self) continue;
+      const HANDLE thread=OpenThread(THREAD_SUSPEND_RESUME|THREAD_GET_CONTEXT|THREAD_QUERY_INFORMATION,FALSE,entry.th32ThreadID);
+      if(!thread) continue;
+      std::string frames;
+      if(SuspendThread(thread)!=DWORD(-1)) { frames=ThreadStack(thread); ResumeThread(thread); }
+      CloseHandle(thread);
+      // Threads parked in the kernel's idle waits say nothing: keep those with one of our modules or the game's.
+      if(frames.find(".dll+")==std::string::npos && frames.find(".exe+")==std::string::npos) continue;
+      xess_mod::WriteLog("vk_hang_thread","\"thread\":"+std::to_string(entry.th32ThreadID)+",\"base_presents\":"
+          +std::to_string(last)+",\"stack\":["+frames+"]");
+      ++logged;
+    }
+    CloseHandle(threads);
+    FlushLog();
+  }
+}
+
 void InstallDiagnostics() noexcept {
   static std::atomic<bool> added{};
   if(added.exchange(true)) return;
   const auto ini=backend::Directory()/L"MFGAdaUnlock.ini";
-  if(GetPrivateProfileIntW(L"Diagnostics",L"VulkanFaults",0,ini.c_str())) AddVectoredExceptionHandler(0,&NullCall);
+  if(!GetPrivateProfileIntW(L"Diagnostics",L"VulkanFaults",0,ini.c_str())) return;
+  AddVectoredExceptionHandler(0,&NullCall);
+  if(const auto thread=CreateThread(nullptr,0,&HangWatch,nullptr,0,nullptr)) CloseHandle(thread);
 }
 
 bool Enabled() noexcept {

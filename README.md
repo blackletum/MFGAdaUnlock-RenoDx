@@ -274,30 +274,31 @@ artifact on a HUD/UI element, switch back to **Native**.
 
 ### XeMFG backend tested games
 
-| Game | Status |
-|---|---|
-| Resident Evil Requiem | Working |
-| Monster Hunter Wilds | Working |
-| Dragon's Dogma 2 | Working |
-| Onimusha: Way of the Sword | Working |
-| PRAGMATA | Working |
-| Control Resonant | Working |
-| Assassin's Creed IV: Black Flag Resynced | Working — a built-in profile turns off native-output retention for this game |
-| Cyberpunk 2077 | Working — after a game update, run **Install / update files** again (see [below](#the-panel-says-intel-files-are-missing-or-a-different-version)) |
-| The Witcher 3: Wild Hunt (next-gen) | Working — turn off the game's **VSync** for correct frame pacing. Fixed in 1.5.3: changing path tracing or other graphics settings with frame generation on no longer loses the graphics device |
-| Alan Wake 2 | Working |
-| The Last of Us Part II Remastered | Working |
-| Mafia: The Old Country | Working |
-| Resonance: A Plague Tale Legacy | Working |
-| Death Stranding 2: On the Beach | Working — its jittered motion vectors are corrected automatically |
-| Ghostrunner 2 | Working |
-| S.T.A.L.K.E.R. 2: Heart of Chornobyl | Working — set the display mode to **Borderless / Windowed Fullscreen** |
-| Warhammer 40,000: Darktide | Working — fixed in 1.5.1; on 1.5.0, add `[Adapters] FidelityFX=0` to `MFGAdaUnlock.ini` |
-| Black Myth: Wukong | Working |
-| Kingdom Come: Deliverance II | Working with the DLSS-SR input: turn it on in the panel (see [Enabling the DLSS-SR input](#enabling-the-dlss-sr-input)) |
-| Red Dead Redemption 2 | Working with the DLSS-SR input (user report; the game has no native frame generation): turn it on in the panel (see [Enabling the DLSS-SR input](#enabling-the-dlss-sr-input)) |
-| Elden Ring | Working with the DLSS-SR input and the EldenRingDLSS addon, offline with Easy Anti-Cheat off; turn on **Force game VSync off** in the panel for correct frame pacing (see [Elden Ring](#elden-ring)) |
-| Metro Exodus Enhanced Edition | Working with the DLSS-SR input: turn it on in the panel (see [Enabling the DLSS-SR input](#enabling-the-dlss-sr-input)) |
+| Game | API | Status |
+|---|---|---|
+| Resident Evil Requiem | DX12 | Working |
+| Monster Hunter Wilds | DX12 | Working |
+| Dragon's Dogma 2 | DX12 | Working |
+| Onimusha: Way of the Sword | DX12 | Working |
+| PRAGMATA | DX12 | Working |
+| Control Resonant | DX12 | Working |
+| Assassin's Creed IV: Black Flag Resynced | DX12 | Working — a built-in profile turns off native-output retention for this game |
+| Cyberpunk 2077 | DX12 | Working — after a game update, run **Install / update files** again (see [below](#the-panel-says-intel-files-are-missing-or-a-different-version)) |
+| The Witcher 3: Wild Hunt (next-gen) | DX12 | Working — turn off the game's **VSync** for correct frame pacing. Fixed in 1.5.3: changing path tracing or other graphics settings with frame generation on no longer loses the graphics device |
+| Alan Wake 2 | DX12 | Working |
+| The Last of Us Part II Remastered | DX12 | Working |
+| Mafia: The Old Country | DX12 | Working |
+| Resonance: A Plague Tale Legacy | DX12 | Working |
+| Death Stranding 2: On the Beach | DX12 | Working — its jittered motion vectors are corrected automatically |
+| Ghostrunner 2 | DX12 | Working |
+| S.T.A.L.K.E.R. 2: Heart of Chornobyl | DX12 | Working — set the display mode to **Borderless / Windowed Fullscreen** |
+| Warhammer 40,000: Darktide | DX12 | Working — fixed in 1.5.1; on 1.5.0, add `[Adapters] FidelityFX=0` to `MFGAdaUnlock.ini` |
+| Black Myth: Wukong | DX12 | Working |
+| Kingdom Come: Deliverance II | DX12 | Working with the DLSS-SR input: turn it on in the panel (see [Enabling the DLSS-SR input](#enabling-the-dlss-sr-input)) |
+| Red Dead Redemption 2 | DX12, Vulkan | DX12: working with the DLSS-SR input (user report; the game has no native frame generation): turn it on in the panel (see [Enabling the DLSS-SR input](#enabling-the-dlss-sr-input)). Vulkan (experimental, 1.7): working with DLSS on, in fullscreen, borderless or windowed; no setting needed |
+| Elden Ring | DX12 | Working with the DLSS-SR input and the EldenRingDLSS addon, offline with Easy Anti-Cheat off; turn on **Force game VSync off** in the panel for correct frame pacing (see [Elden Ring](#elden-ring)) |
+| Metro Exodus Enhanced Edition | DX12 | Working with the DLSS-SR input: turn it on in the panel (see [Enabling the DLSS-SR input](#enabling-the-dlss-sr-input)) |
+| Indiana Jones and the Great Circle | Vulkan | Working (experimental, 1.7): turn DLSS on (Super Resolution or Ray Reconstruction); the game's Frame Generation switch turns XeMFG on and off. Launch with `+r_allowBlackListedLayers 1` so ReShade can load |
 
 These games were tested with the XeMFG backend of this fork. This is not a
 claim of universal compatibility. The XeMFG backend needs a game that
@@ -440,9 +441,22 @@ XeSS-FG, or FSR 3.1 frame generation. The game's own frame generation is
 turned off while XeMFG is active; you keep using the game's menu toggle to
 turn frame generation on or off.
 
+**Vulkan (experimental, new in 1.7, on by default):** in Vulkan games XeMFG
+runs Intel's XeFG and XeLL on the game's own Vulkan device through a
+D3D12-on-Vulkan layer from dashdogy's MFG Unlocker 1.7.0. Its inputs come from
+the game's DLSS Super Resolution or Ray Reconstruction, so DLSS must be on. In
+games with DLSS frame generation (Indiana Jones) the game's switch turns XeMFG
+on and off; in games without it (Red Dead Redemption 2) XeMFG generates frames
+whenever DLSS runs. The Vulkan path replaces the game's swap chain, so a game
+it has not been tested with can still fail: if a Vulkan game crashes, freezes
+or shows a black screen with XeMFG selected, set `[XeFG] Vulkan=0` in
+`MFGAdaUnlock.ini` and report it (see [Reporting an XeMFG problem](#reporting-an-xemfg-problem)).
+Tested Vulkan games are marked **Vulkan** in the
+[XeMFG table](#xemfg-backend-tested-games).
+
 ### XeMFG requirements
 
-- GeForce **RTX 20, 30, 40 or 50-series**, D3D12.
+- GeForce **RTX 20, 30, 40 or 50-series**, D3D12 or Vulkan (experimental).
 - ReShade with addon support (or a RenoDX mod for the game).
 - Windowed or borderless display. Exclusive fullscreen is not supported with
   XeMFG; by default the game's display mode is kept unchanged and frame
@@ -531,6 +545,7 @@ XeMFG chooses its input from what the game actually calls.
 | The game's own XeSS frame generation | The game's XeFG context is kept and uses the panel multiplier | Supported |
 | FidelityFX FSR 3.1 frame generation | The FSR swapchain becomes the XeMFG output and FSR's prepare data feeds XeFG. The addon synthesizes latency markers, because FSR provides none | Supported; disable with `[Adapters] FidelityFX=0` |
 | DLSS Super Resolution only (no frame generation) | DLSS-SR evaluations provide depth and motion vectors | Experimental, off by default (`[Adapters] DlssSr=1`). NGX has no camera data, so a default projection is assumed and the HUD is interpolated |
+| Vulkan: DLSS Super Resolution or Ray Reconstruction | The game's DLSS evaluations provide depth and motion vectors, copied at the frame's present | Experimental, on by default (`[XeFG] Vulkan`). A default projection is assumed and the HUD is interpolated |
 
 **Motion vectors and HDR:** games whose motion vectors include camera jitter
 (such as Death Stranding 2) are corrected on the GPU before XeFG. HDR10
